@@ -236,75 +236,187 @@ function FilesChanged(props: { files: FileDiff[]; comments: Comment[]; actions: 
     return m;
   }, [comments, files]);
 
+  const [active, setActive] = useState<string | null>(null);
+
   const adds = files.reduce((n, f) => n + f.additions, 0);
   const dels = files.reduce((n, f) => n + f.deletions, 0);
   if (files.length === 0) return <div className="box box-row muted">No changes between these branches.</div>;
 
+  const openThreads = new Map<string, number>();
+  for (const ts of threadsByLine.values())
+    for (const t of ts) if (!t.resolved) openThreads.set(t.path!, (openThreads.get(t.path!) ?? 0) + 1);
+
+  const jumpTo = (path: string) => {
+    setActive(path);
+    setCollapsed({ ...collapsed, [path]: false });
+    document.getElementById(fileAnchor(path))?.scrollIntoView({ block: "start" });
+  };
+
   return (
-    <div>
-      <div className="diffstat muted small">
-        {files.length} files changed <span className="add-text">+{adds}</span> <span className="del-text">−{dels}</span>
-      </div>
-      {files.map((f) => {
-        const path = filePath(f);
-        const isCollapsed = collapsed[path];
-        return (
-          <div key={path} className="file box">
-            <div className="file-header" onClick={() => setCollapsed({ ...collapsed, [path]: !isCollapsed })}>
-              <span className="chevron">{isCollapsed ? "▸" : "▾"}</span>
-              <span className="add-text">+{f.additions}</span> <span className="del-text">−{f.deletions}</span>
-              <span className="file-path">
-                {f.status === "renamed" ? `${f.oldPath} → ${f.newPath}` : path}
-              </span>
-              {f.status !== "modified" && <span className="label">{f.status}</span>}
-            </div>
-            {!isCollapsed &&
-              (f.binary ? (
-                <div className="box-row muted">Binary file not shown.</div>
-              ) : (
-                <table className="diff">
-                  <colgroup>
-                    <col className="num-col" />
-                    <col className="num-col" />
-                    <col />
-                  </colgroup>
-                  <tbody>
-                    {f.lines.map((l, i) => {
-                      if (l.kind === "hunk")
+    <div className="files-layout">
+      <FileTree files={files} active={active} openThreads={openThreads} onSelect={jumpTo} />
+      <div className="files-main">
+        <div className="diffstat muted small">
+          {files.length} files changed <span className="add-text">+{adds}</span> <span className="del-text">−{dels}</span>
+        </div>
+        {files.map((f) => {
+          const path = filePath(f);
+          const isCollapsed = collapsed[path];
+          return (
+            <div key={path} id={fileAnchor(path)} className="file box">
+              <div className="file-header" onClick={() => setCollapsed({ ...collapsed, [path]: !isCollapsed })}>
+                <span className="chevron">{isCollapsed ? "▸" : "▾"}</span>
+                <span className="add-text">+{f.additions}</span> <span className="del-text">−{f.deletions}</span>
+                <span className="file-path">
+                  {f.status === "renamed" ? `${f.oldPath} → ${f.newPath}` : path}
+                </span>
+                {f.status !== "modified" && <span className="label">{f.status}</span>}
+              </div>
+              {!isCollapsed &&
+                (f.binary ? (
+                  <div className="box-row muted">Binary file not shown.</div>
+                ) : (
+                  <table className="diff">
+                    <colgroup>
+                      <col className="num-col" />
+                      <col className="num-col" />
+                      <col />
+                    </colgroup>
+                    <tbody>
+                      {f.lines.map((l, i) => {
+                        if (l.kind === "hunk")
+                          return (
+                            <tr key={i} className="hunk">
+                              <td colSpan={2} />
+                              <td>{l.text}</td>
+                            </tr>
+                          );
+                        const side: Side = l.kind === "del" ? "old" : "new";
+                        const lineNo = (side === "old" ? l.oldNo : l.newNo)!;
+                        const k = lineKey(path, side, lineNo);
+                        const threads = threadsByLine.get(k) ?? [];
                         return (
-                          <tr key={i} className="hunk">
-                            <td colSpan={2} />
-                            <td>{l.text}</td>
-                          </tr>
+                          <DiffRow
+                            key={i}
+                            line={l}
+                            onAdd={() => setComposer(k)}
+                            threads={threads}
+                            comments={comments}
+                            actions={actions}
+                            composing={composer === k}
+                            onCancel={() => setComposer(null)}
+                            onSubmit={async (body) => {
+                              await actions.addComment({ body, path, line: lineNo, side, line_text: l.text });
+                              setComposer(null);
+                            }}
+                          />
                         );
-                      const side: Side = l.kind === "del" ? "old" : "new";
-                      const lineNo = (side === "old" ? l.oldNo : l.newNo)!;
-                      const k = lineKey(path, side, lineNo);
-                      const threads = threadsByLine.get(k) ?? [];
-                      return (
-                        <DiffRow
-                          key={i}
-                          line={l}
-                          onAdd={() => setComposer(k)}
-                          threads={threads}
-                          comments={comments}
-                          actions={actions}
-                          composing={composer === k}
-                          onCancel={() => setComposer(null)}
-                          onSubmit={async (body) => {
-                            await actions.addComment({ body, path, line: lineNo, side, line_text: l.text });
-                            setComposer(null);
-                          }}
-                        />
-                      );
-                    })}
-                  </tbody>
-                </table>
-              ))}
+                      })}
+                    </tbody>
+                  </table>
+                ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function fileAnchor(path: string) {
+  return `file-${path}`;
+}
+
+type TreeNode = { name: string; path: string; dirs: TreeNode[]; files: FileDiff[] };
+
+/** Nests changed files into folders; folders with a single subfolder are merged ("web/src") like GitHub. */
+function buildTree(files: FileDiff[]): TreeNode {
+  const root: TreeNode = { name: "", path: "", dirs: [], files: [] };
+  for (const f of files) {
+    const parts = filePath(f).split("/");
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      const path = node.path ? `${node.path}/${part}` : part;
+      let next = node.dirs.find((d) => d.name === part);
+      if (!next) node.dirs.push((next = { name: part, path, dirs: [], files: [] }));
+      node = next;
+    }
+    node.files.push(f);
+  }
+  const compress = (n: TreeNode): TreeNode => {
+    n.dirs = n.dirs.map(compress).sort((a, b) => a.name.localeCompare(b.name));
+    if (n.path && n.files.length === 0 && n.dirs.length === 1) {
+      const only = n.dirs[0];
+      return { ...only, name: `${n.name}/${only.name}` };
+    }
+    return n;
+  };
+  return compress(root);
+}
+
+const STATUS_MARK: Record<FileDiff["status"], [string, string]> = {
+  added: ["+", "add-text"],
+  deleted: ["−", "del-text"],
+  modified: ["•", "mod-text"],
+  renamed: ["→", "mod-text"],
+};
+
+function FileTree(props: {
+  files: FileDiff[];
+  active: string | null;
+  openThreads: Map<string, number>;
+  onSelect: (path: string) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [closed, setClosed] = useState<Set<string>>(new Set());
+  const q = filter.toLowerCase();
+  const tree = useMemo(
+    () => buildTree(props.files.filter((f) => filePath(f).toLowerCase().includes(q))),
+    [props.files, q],
+  );
+
+  const toggle = (path: string) => {
+    const next = new Set(closed);
+    next.has(path) ? next.delete(path) : next.add(path);
+    setClosed(next);
+  };
+
+  const render = (n: TreeNode, depth: number): JSX.Element[] => [
+    ...n.dirs.flatMap((d) => [
+      <div key={`d:${d.path}`} className="tree-row" style={{ paddingLeft: 8 + depth * 14 }} onClick={() => toggle(d.path)}>
+        <span className="chevron">{closed.has(d.path) ? "▸" : "▾"}</span>
+        <span className="tree-dir">{d.name}</span>
+      </div>,
+      ...(closed.has(d.path) ? [] : render(d, depth + 1)),
+    ]),
+    ...n.files
+      .slice()
+      .sort((a, b) => filePath(a).localeCompare(filePath(b)))
+      .map((f) => {
+        const path = filePath(f);
+        const [mark, cls] = STATUS_MARK[f.status];
+        const open = props.openThreads.get(path);
+        return (
+          <div
+            key={`f:${path}`}
+            className={`tree-row ${props.active === path ? "active" : ""}`}
+            style={{ paddingLeft: 8 + depth * 14 + 16 }}
+            title={path}
+            onClick={() => props.onSelect(path)}
+          >
+            <span className="tree-file">{path.split("/").pop()}</span>
+            {open ? <span className="count">{open}</span> : null}
+            <span className={`tree-mark ${cls}`}>{mark}</span>
           </div>
         );
-      })}
-    </div>
+      }),
+  ];
+
+  return (
+    <aside className="file-tree">
+      <input className="tree-filter" placeholder="Filter changed files" value={filter} onChange={(e) => setFilter(e.target.value)} />
+      <div className="tree-list">{render(tree, 0)}</div>
+    </aside>
   );
 }
 

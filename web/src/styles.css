@@ -139,3 +139,28 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 }
 .diff tr.line:hover .add-comment { opacity: 1; }
 .add-comment:hover { transform: scale(1); }
+
+/* Files changed: file tree on the left, diffs on the right. */
+.files-layout { display: flex; gap: 16px; align-items: flex-start; }
+.files-main { flex: 1; min-width: 0; }
+.file { scroll-margin-top: 8px; }
+.file-tree {
+  width: 240px; flex-shrink: 0; position: sticky; top: 8px;
+  max-height: calc(100vh - 16px); display: flex; flex-direction: column;
+}
+.tree-filter {
+  padding: 5px 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font: inherit;
+}
+.tree-list { overflow-y: auto; }
+.tree-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px;
+  cursor: pointer; white-space: nowrap; font-size: 13px;
+}
+.tree-row:hover { background: var(--bg-subtle); }
+.tree-row.active { background: var(--hunk-bg); font-weight: 600; }
+.tree-dir, .tree-file { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.tree-dir { color: var(--muted); }
+.tree-mark { width: 12px; text-align: center; font-weight: 700; }
+.mod-text { color: #9a6700; }
+@media (max-width: 700px) { .file-tree { display: none; } }

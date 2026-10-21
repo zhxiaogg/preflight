@@ -104,7 +104,13 @@ async fn static_handler(uri: Uri) -> Response {
         },
     };
     let mime = mime_guess::from_path(name).first_or_octet_stream();
-    ([(header::CONTENT_TYPE, mime.as_ref().to_string())], file.data).into_response()
+    // Vite hashes asset filenames, so only index.html must be revalidated after an upgrade.
+    let cache = if name.starts_with("assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
+    (
+        [(header::CONTENT_TYPE, mime.as_ref().to_string()), (header::CACHE_CONTROL, cache.to_string())],
+        file.data,
+    )
+        .into_response()
 }
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
