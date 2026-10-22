@@ -1,0 +1,129 @@
+use crate::{db, git};
+use axum::{
+    extract::Path,
+    http::{header, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use rust_embed::Embed;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+#[derive(Embed)]
+#[folder = "web/dist/"]
+struct Assets;
+
+struct ApiError(StatusCode, String);
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(e: anyhow::Error) -> Self {
+        ApiError(StatusCode::BAD_REQUEST, format!("{e:#}"))
+    }
+}
+
+type ApiResult = Result<Json<Value>, ApiError>;
+
+fn not_found(what: &str) -> ApiError {
+    ApiError(StatusCode::NOT_FOUND, format!("{what} not found"))
+}
+
+fn load_pr(id: i64) -> Result<db::Pr, ApiError> {
+    db::get_pr(&db::open()?, id)?.ok_or_else(|| not_found("pr"))
+}
+
+async fn list_prs() -> ApiResult {
+    Ok(Json(json!(db::list_prs(&db::open()?)?)))
+}
+
+#[derive(Deserialize)]
+struct CreatePr {
+    repo: String,
+    base: String,
+    head: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+}
+
+async fn create_pr(Json(b): Json<CreatePr>) -> ApiResult {
+    Ok(Json(json!(crate::create_pr(&b.repo, &b.base, &b.head, &b.title, &b.description)?)))
+}
+
+async fn get_pr(Path(id): Path<i64>) -> ApiResult {
+    let pr = load_pr(id)?;
+    let base_sha = git::rev_parse(&pr.repo, &pr.base)?;
+    let head_sha = git::rev_parse(&pr.repo, &pr.head)?;
+    let commits: Vec<Value> = git::commits(&pr.repo, &pr.base, &pr.head)?
+        .into_iter()
+        .map(|(sha, subject)| json!({ "sha": sha, "subject": subject }))
+        .collect();
+    Ok(Json(json!({ "pr": pr, "base_sha": base_sha, "head_sha": head_sha, "commits": commits })))
+}
+
+async fn get_diff(Path(id): Path<i64>) -> ApiResult {
+    let pr = load_pr(id)?;
+    Ok(Json(json!({ "diff": git::diff(&pr.repo, &pr.base, &pr.head)? })))
+}
+
+async fn list_comments(Path(id): Path<i64>) -> ApiResult {
+    Ok(Json(json!(db::list_comments(&db::open()?, id)?)))
+}
+
+async fn add_comment(Path(id): Path<i64>, Json(n): Json<db::NewComment>) -> ApiResult {
+    load_pr(id)?;
+    Ok(Json(json!(db::add_comment(&db::open()?, id, &n)?)))
+}
+
+#[derive(Deserialize)]
+struct Resolve {
+    resolved: bool,
+}
+
+async fn resolve_comment(Path(id): Path<i64>, Json(r): Json<Resolve>) -> ApiResult {
+    let conn = db::open()?;
+    db::get_comment(&conn, id)?.ok_or_else(|| not_found("comment"))?;
+    db::set_resolved(&conn, id, r.resolved)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Serves the embedded React app; unknown paths fall back to index.html (client-side routing).
+async fn static_handler(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let (file, name) = match Assets::get(path) {
+        Some(f) if !path.is_empty() => (f, path),
+        _ => match Assets::get("index.html") {
+            Some(f) => (f, "index.html"),
+            None => return (StatusCode::NOT_FOUND, "web UI not built").into_response(),
+        },
+    };
+    let mime = mime_guess::from_path(name).first_or_octet_stream();
+    // Vite hashes asset filenames, so only index.html must be revalidated after an upgrade.
+    let cache = if name.starts_with("assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
+    (
+        [(header::CONTENT_TYPE, mime.as_ref().to_string()), (header::CACHE_CONTROL, cache.to_string())],
+        file.data,
+    )
+        .into_response()
+}
+
+pub async fn serve(port: u16) -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/api/prs", get(list_prs).post(create_pr))
+        .route("/api/prs/:id", get(get_pr))
+        .route("/api/prs/:id/diff", get(get_diff))
+        .route("/api/prs/:id/comments", get(list_comments).post(add_comment))
+        .route("/api/comments/:id/resolve", post(resolve_comment))
+        .fallback(static_handler);
+    // Bind to loopback only: this exposes your local repos' contents.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    println!("preflight serving on http://localhost:{port}  (db: {})", db::db_path().display());
+    axum::serve(listener, app).await?;
+    Ok(())
+}

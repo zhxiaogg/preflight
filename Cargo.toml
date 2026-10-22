@@ -1,0 +1,20 @@
+[package]
+name = "preflight"
+version = "0.1.0"
+edition = "2021"
+description = "Preflight PRs: let humans review LLM agent work in a GitHub-like UI before opening a remote PR"
+
+[[bin]]
+name = "preflight"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.7"
+clap = { version = "4", features = ["derive", "env"] }
+mime_guess = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
