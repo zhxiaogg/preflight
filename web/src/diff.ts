@@ -3,6 +3,7 @@
 export type DiffLine = {
   kind: "add" | "del" | "ctx" | "hunk";
   text: string;
+  /** Line numbers; for "hunk" lines, the first old/new line number of the hunk. */
   oldNo?: number;
   newNo?: number;
 };
@@ -44,7 +45,7 @@ export function parseDiff(text: string): FileDiff[] {
       const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
       oldNo = Number(m?.[1] ?? 0);
       newNo = Number(m?.[2] ?? 0);
-      f.lines.push({ kind: "hunk", text: line });
+      f.lines.push({ kind: "hunk", text: line, oldNo, newNo });
     } else if (f.lines.length === 0) {
       // File header section, before the first hunk.
       if (line.startsWith("new file mode")) f.status = "added";

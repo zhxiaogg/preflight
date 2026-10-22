@@ -1,6 +1,6 @@
 use crate::{db, git};
 use axum::{
-    extract::Path,
+    extract::{Path, Query},
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -70,6 +70,17 @@ async fn get_pr(Path(id): Path<i64>) -> ApiResult {
 async fn get_diff(Path(id): Path<i64>) -> ApiResult {
     let pr = load_pr(id)?;
     Ok(Json(json!({ "diff": git::diff(&pr.repo, &pr.base, &pr.head)? })))
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+/// Full file at the PR's head, for expanding hidden context lines in the diff.
+async fn get_file(Path(id): Path<i64>, Query(q): Query<FileQuery>) -> ApiResult {
+    let pr = load_pr(id)?;
+    Ok(Json(json!({ "content": git::show(&pr.repo, &pr.head, &q.path)? })))
 }
 
 async fn list_comments(Path(id): Path<i64>) -> ApiResult {
@@ -145,6 +156,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .route("/api/prs", get(list_prs).post(create_pr))
         .route("/api/prs/:id", get(get_pr))
         .route("/api/prs/:id/diff", get(get_diff))
+        .route("/api/prs/:id/file", get(get_file))
         .route("/api/prs/:id/comments", get(list_comments).post(add_comment))
         .route("/api/prs/:id/reviews", get(list_reviews).post(add_review))
         .route("/api/prs/:id/state", post(set_pr_state))

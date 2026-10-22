@@ -245,3 +245,12 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .viewed-toggle { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .tree-row.viewed .tree-file { color: var(--muted); }
 .tree-viewed { color: var(--green); font-size: 12px; }
+
+/* Context expanders on hunk headers. */
+.diff tr.hunk td.expander { padding: 0; text-align: center; white-space: nowrap; }
+.expander button {
+  border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px;
+  padding: 2px 8px; border-radius: 4px;
+}
+.expander button:hover { background: var(--accent); color: #fff; }
+.diff tr.expanded .code { background: var(--bg-subtle); }

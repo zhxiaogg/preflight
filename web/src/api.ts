@@ -66,6 +66,8 @@ export const api = {
   listPrs: () => req<Pr[]>("/api/prs"),
   getPr: (id: number) => req<PrDetail>(`/api/prs/${id}`),
   getDiff: (id: number) => req<{ diff: string }>(`/api/prs/${id}/diff`),
+  getFile: (id: number, path: string) =>
+    req<{ content: string }>(`/api/prs/${id}/file?path=${encodeURIComponent(path)}`),
   listComments: (id: number) => req<Comment[]>(`/api/prs/${id}/comments`),
   addComment: (id: number, c: NewComment) =>
     req<Comment>(`/api/prs/${id}/comments`, { method: "POST", body: JSON.stringify(c) }),

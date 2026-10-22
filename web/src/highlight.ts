@@ -44,6 +44,13 @@ function splitLines(html: string): string[] {
   return lines;
 }
 
+/** Highlights a whole file, one HTML string per line, or null when the language is unknown. */
+export function highlightText(path: string, text: string): string[] | null {
+  const lang = language(path);
+  if (!lang || text.split("\n").length > MAX_LINES) return null;
+  return splitLines(hljs.highlight(text, { language: lang }).value);
+}
+
 /**
  * Returns highlighted HTML for each line of the file's diff (aligned with `f.lines`), or null
  * when the language is unknown. Each side of a hunk is highlighted as one block so multi-line

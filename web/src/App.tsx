@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, Comment, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
 import { DiffLine, FileDiff, filePath, parseDiff } from "./diff";
-import { highlightFile } from "./highlight";
+import { highlightFile, highlightText } from "./highlight";
 import { Markdown } from "./Markdown";
 
 const POLL_MS = 4000;
@@ -378,45 +378,16 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
                 (f.binary ? (
                   <div className="box-row muted">Binary file not shown.</div>
                 ) : (
-                  <table className="diff">
-                    <colgroup>
-                      <col className="num-col" />
-                      <col className="num-col" />
-                      <col />
-                    </colgroup>
-                    <tbody>
-                      {f.lines.map((l, i) => {
-                        if (l.kind === "hunk")
-                          return (
-                            <tr key={i} className="hunk">
-                              <td colSpan={2} />
-                              <td>{l.text}</td>
-                            </tr>
-                          );
-                        const side: Side = l.kind === "del" ? "old" : "new";
-                        const lineNo = (side === "old" ? l.oldNo : l.newNo)!;
-                        const k = lineKey(path, side, lineNo);
-                        const threads = threadsByLine.get(k) ?? [];
-                        return (
-                          <DiffRow
-                            key={i}
-                            line={l}
-                            html={highlighted[fi]?.[i]}
-                            onAdd={() => setComposer(k)}
-                            threads={threads}
-                            comments={comments}
-                            actions={actions}
-                            composing={composer === k}
-                            onCancel={() => setComposer(null)}
-                            onSubmit={async (body) => {
-                              await actions.addComment({ body, path, line: lineNo, side, line_text: l.text });
-                              setComposer(null);
-                            }}
-                          />
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                  <FileDiffTable
+                    prId={props.prId}
+                    file={f}
+                    html={highlighted[fi]}
+                    threadsByLine={threadsByLine}
+                    comments={comments}
+                    actions={actions}
+                    composer={composer}
+                    setComposer={setComposer}
+                  />
                 ))}
             </div>
           );
@@ -558,8 +529,154 @@ function FileTree(props: {
   );
 }
 
+/** Hidden unchanged lines revealed per click, like GitHub. */
+const EXPAND_STEP = 20;
+
+function FileDiffTable(props: {
+  prId: number;
+  file: FileDiff;
+  html: (string | undefined)[] | null;
+  threadsByLine: Map<string, Comment[]>;
+  comments: Comment[];
+  actions: Actions;
+  composer: string | null;
+  setComposer: (k: string | null) => void;
+}) {
+  const { file: f, threadsByLine, comments, actions, composer, setComposer } = props;
+  const path = filePath(f);
+  // Full new-side file, fetched on the first expand.
+  const [content, setContent] = useState<string[] | null>(null);
+  const [loadErr, setLoadErr] = useState("");
+  // Lines revealed above each hunk (keyed by the hunk's index in f.lines) and after the last one.
+  const [above, setAbove] = useState<Record<number, number>>({});
+  const [below, setBelow] = useState(0);
+  const contentHtml = useMemo(() => content && highlightText(path, content.join("\n")), [content, path]);
+  const canExpand = f.status === "modified" || f.status === "renamed";
+
+  const ensureContent = async () => {
+    if (content) return;
+    try {
+      const { content: text } = await api.getFile(props.prId, path);
+      const lines = text.split("\n");
+      if (lines[lines.length - 1] === "") lines.pop();
+      setContent(lines);
+    } catch (e) {
+      setLoadErr(String(e));
+      throw e;
+    }
+  };
+  const expandAbove = (hunk: number, n: number) =>
+    ensureContent().then(() => setAbove((a) => ({ ...a, [hunk]: (a[hunk] ?? 0) + n })), () => {});
+  const expandBelow = () => ensureContent().then(() => setBelow((b) => b + EXPAND_STEP), () => {});
+
+  const contextRow = (newNo: number, oldNo: number) => (
+    <DiffRow
+      key={`x${newNo}`}
+      line={{ kind: "ctx", text: content![newNo - 1] ?? "", oldNo, newNo }}
+      html={contentHtml?.[newNo - 1]}
+      expanded
+      threads={[]}
+      comments={comments}
+      actions={actions}
+      composing={false}
+      onAdd={() => {}}
+      onCancel={() => {}}
+      onSubmit={async () => {}}
+    />
+  );
+
+  const rows: JSX.Element[] = [];
+  let lastNew = 0;
+  let lastOld = 0;
+  f.lines.forEach((l, i) => {
+    if (l.kind === "hunk") {
+      const start = l.newNo!;
+      const delta = l.newNo! - l.oldNo!;
+      const gap = canExpand ? start - 1 - lastNew : 0;
+      const shown = Math.min(above[i] ?? 0, gap);
+      const hidden = gap - shown;
+      // Once a gap is fully expanded the hunks merge and the header disappears, as on GitHub.
+      if (hidden > 0 || (i === 0 && gap === 0))
+        rows.push(
+          <tr key={`h${i}`} className="hunk">
+            <td colSpan={2} className="expander">
+              {hidden > 0 && (
+                <>
+                  <button title="Expand up" onClick={() => expandAbove(i, EXPAND_STEP)}>
+                    ↑
+                  </button>
+                  {hidden > EXPAND_STEP && (
+                    <button title="Expand all" onClick={() => expandAbove(i, hidden)}>
+                      ↕
+                    </button>
+                  )}
+                </>
+              )}
+            </td>
+            <td>{l.text}</td>
+          </tr>,
+        );
+      for (let n = start - shown; n < start; n++) rows.push(contextRow(n, n - delta));
+      return;
+    }
+    if (l.newNo !== undefined) lastNew = l.newNo;
+    if (l.oldNo !== undefined) lastOld = l.oldNo;
+    const side: Side = l.kind === "del" ? "old" : "new";
+    const lineNo = (side === "old" ? l.oldNo : l.newNo)!;
+    const k = lineKey(path, side, lineNo);
+    rows.push(
+      <DiffRow
+        key={i}
+        line={l}
+        html={props.html?.[i]}
+        onAdd={() => setComposer(k)}
+        threads={threadsByLine.get(k) ?? []}
+        comments={comments}
+        actions={actions}
+        composing={composer === k}
+        onCancel={() => setComposer(null)}
+        onSubmit={async (body) => {
+          await actions.addComment({ body, path, line: lineNo, side, line_text: l.text });
+          setComposer(null);
+        }}
+      />,
+    );
+  });
+
+  // Lines after the last hunk. Until the file is fetched we can't know whether any exist.
+  if (canExpand) {
+    const tail = content ? content.length - lastNew : Infinity;
+    const shown = Math.min(below, tail);
+    for (let n = lastNew + 1; n <= lastNew + shown; n++) rows.push(contextRow(n, n - (lastNew - lastOld)));
+    if (tail - shown > 0)
+      rows.push(
+        <tr key="tail" className="hunk">
+          <td colSpan={2} className="expander">
+            <button title="Expand down" onClick={expandBelow}>
+              ↓
+            </button>
+          </td>
+          <td>{loadErr}</td>
+        </tr>,
+      );
+  }
+
+  return (
+    <table className="diff">
+      <colgroup>
+        <col className="num-col" />
+        <col className="num-col" />
+        <col />
+      </colgroup>
+      <tbody>{rows}</tbody>
+    </table>
+  );
+}
+
 function DiffRow(props: {
   line: DiffLine;
+  /** Unchanged line revealed by expanding context; not commentable since it's outside the diff. */
+  expanded?: boolean;
   /** Syntax-highlighted line (escaped by highlight.js), if the language is known. */
   html?: string;
   threads: Comment[];
@@ -574,13 +691,15 @@ function DiffRow(props: {
   const sign = l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ";
   return (
     <>
-      <tr className={`line ${l.kind}`}>
+      <tr className={`line ${l.kind} ${props.expanded ? "expanded" : ""}`}>
         <td className="num">{l.oldNo ?? ""}</td>
         <td className="num">{l.newNo ?? ""}</td>
         <td className="code">
-          <button className="add-comment" title="Add a comment" onClick={props.onAdd}>
-            +
-          </button>
+          {!props.expanded && (
+            <button className="add-comment" title="Add a comment" onClick={props.onAdd}>
+              +
+            </button>
+          )}
           <span className="sign">{sign}</span>
           {props.html !== undefined ? <span dangerouslySetInnerHTML={{ __html: props.html }} /> : l.text}
         </td>
