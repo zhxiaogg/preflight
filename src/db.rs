@@ -40,6 +40,9 @@ pub struct Comment {
     pub path: Option<String>,
     pub line: Option<i64>,
     pub side: Option<String>,
+    /// First line of a multi-line comment (`line` is the last); None for single-line comments.
+    pub start_line: Option<i64>,
+    pub start_side: Option<String>,
     pub line_text: Option<String>,
     pub resolved: bool,
     pub created_at: i64,
@@ -55,7 +58,9 @@ pub struct NewComment {
     pub line: Option<i64>,
     /// "old" or "new": which side of the diff the line number refers to.
     pub side: Option<String>,
-    /// Snapshot of the commented line so agents get context even if the diff moves.
+    pub start_line: Option<i64>,
+    pub start_side: Option<String>,
+    /// Snapshot of the commented line(s) so agents get context even if the diff moves.
     pub line_text: Option<String>,
 }
 
@@ -100,11 +105,17 @@ pub fn open() -> Result<Connection> {
            created_at INTEGER NOT NULL);",
     )?;
     // Columns added after the first release.
-    let has_state: bool = conn
-        .prepare("SELECT 1 FROM pragma_table_info('prs') WHERE name = 'state'")?
-        .exists([])?;
-    if !has_state {
-        conn.execute_batch("ALTER TABLE prs ADD COLUMN state TEXT NOT NULL DEFAULT 'open'")?;
+    for (table, column, ddl) in [
+        ("prs", "state", "ALTER TABLE prs ADD COLUMN state TEXT NOT NULL DEFAULT 'open'"),
+        ("comments", "start_line", "ALTER TABLE comments ADD COLUMN start_line INTEGER"),
+        ("comments", "start_side", "ALTER TABLE comments ADD COLUMN start_side TEXT"),
+    ] {
+        let exists = conn
+            .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
+            .exists([column])?;
+        if !exists {
+            conn.execute_batch(ddl)?;
+        }
     }
     Ok(conn)
 }
@@ -115,8 +126,8 @@ fn now() -> i64 {
 
 const PR_COLS: &str = "id, repo, base, head, title, description, state, created_at";
 const REVIEW_COLS: &str = "id, pr_id, author, state, body, created_at";
-const COMMENT_COLS: &str =
-    "id, pr_id, parent_id, author, body, path, line, side, line_text, resolved, created_at";
+const COMMENT_COLS: &str = "id, pr_id, parent_id, author, body, path, line, side, start_line, start_side, \
+                            line_text, resolved, created_at";
 
 fn pr_row(r: &Row) -> rusqlite::Result<Pr> {
     Ok(Pr {
@@ -152,9 +163,11 @@ fn comment_row(r: &Row) -> rusqlite::Result<Comment> {
         path: r.get(5)?,
         line: r.get(6)?,
         side: r.get(7)?,
-        line_text: r.get(8)?,
-        resolved: r.get(9)?,
-        created_at: r.get(10)?,
+        start_line: r.get(8)?,
+        start_side: r.get(9)?,
+        line_text: r.get(10)?,
+        resolved: r.get(11)?,
+        created_at: r.get(12)?,
     })
 }
 
@@ -196,19 +209,27 @@ pub fn get_comment(c: &Connection, id: i64) -> Result<Option<Comment>> {
 
 pub fn add_comment(c: &Connection, pr_id: i64, n: &NewComment) -> Result<Comment> {
     // Replies inherit the anchor of the thread root.
-    let (path, line, side, line_text) = match n.parent_id {
+    let (path, line, side, start_line, start_side, line_text) = match n.parent_id {
         Some(pid) => {
             let parent = get_comment(c, pid)?.context("parent comment not found")?;
             anyhow::ensure!(parent.pr_id == pr_id, "parent comment belongs to another PR");
             anyhow::ensure!(parent.parent_id.is_none(), "can only reply to a thread root");
-            (parent.path, parent.line, parent.side, parent.line_text)
+            (parent.path, parent.line, parent.side, parent.start_line, parent.start_side, parent.line_text)
         }
-        None => (n.path.clone(), n.line, n.side.clone(), n.line_text.clone()),
+        None => (
+            n.path.clone(),
+            n.line,
+            n.side.clone(),
+            n.start_line,
+            n.start_side.clone(),
+            n.line_text.clone(),
+        ),
     };
     c.execute(
-        "INSERT INTO comments (pr_id, parent_id, author, body, path, line, side, line_text, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![pr_id, n.parent_id, n.author, n.body, path, line, side, line_text, now()],
+        "INSERT INTO comments
+           (pr_id, parent_id, author, body, path, line, side, start_line, start_side, line_text, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![pr_id, n.parent_id, n.author, n.body, path, line, side, start_line, start_side, line_text, now()],
     )?;
     get_comment(c, c.last_insert_rowid())?.context("comment vanished after insert")
 }

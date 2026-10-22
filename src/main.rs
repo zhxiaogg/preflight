@@ -160,13 +160,21 @@ fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -
     for r in roots {
         let state = if r.resolved { "resolved" } else { "unresolved" };
         let loc = match (&r.path, r.line) {
-            (Some(p), Some(l)) => format!("{p}:{l} ({} side)", r.side.as_deref().unwrap_or("new")),
+            (Some(p), Some(l)) => {
+                let lines = match r.start_line {
+                    Some(s) if s != l => format!("{s}-{l}"),
+                    _ => l.to_string(),
+                };
+                format!("{p}:{lines} ({} side)", r.side.as_deref().unwrap_or("new"))
+            }
             (Some(p), None) => p.clone(),
             _ => "general".into(),
         };
         println!("#{} [{state}] {loc} — {}", r.id, r.author);
         if let Some(t) = &r.line_text {
-            println!("    > {t}");
+            for l in t.lines() {
+                println!("    > {l}");
+            }
         }
         for l in r.body.lines() {
             println!("    {l}");
@@ -232,6 +240,8 @@ fn main() -> Result<()> {
                 path: None,
                 line: None,
                 side: None,
+                start_line: None,
+                start_side: None,
                 line_text: None,
             };
             let c = db::add_comment(&conn, parent.pr_id, &n)?;

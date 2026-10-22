@@ -26,7 +26,7 @@ Agent opens a preflight PR (diff is `base...head`, computed live, so new commits
 preflight create --repo /path/to/repo --base main --head my-feature --title "Add X" --description "Why…"
 ```
 
-Review in the browser like on GitHub: syntax-highlighted diffs with a file tree, `+` on a line to comment,
+Review in the browser like on GitHub: syntax-highlighted diffs with a file tree, `+` on a line to comment (drag the `+` or shift-click line numbers to comment on several lines),
 expandable context around hunks (↑ expand up, ↓ expand down), markdown in descriptions and comments, "Viewed" checkboxes, reply/resolve threads, and **Review changes**
 (Comment / Approve / Request changes). A banner appears when the agent pushes new commits.
 

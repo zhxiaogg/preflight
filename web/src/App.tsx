@@ -186,6 +186,9 @@ function PrPage({ id }: { id: number }) {
   );
 }
 
+/** Lines selected for a comment: indices into the file's diff lines, within one hunk. */
+type LineSelection = { path: string; anchor: number; head: number; dragging: boolean };
+
 type Actions = {
   addComment: (c: NewComment) => Promise<void>;
   resolve: (id: number, resolved: boolean) => Promise<void>;
@@ -210,7 +213,20 @@ function lineTexts(files: FileDiff[]) {
 function isOutdated(c: Comment, texts: Map<string, string>) {
   if (c.path === null || c.line === null) return false;
   const cur = texts.get(lineKey(c.path, c.side ?? "new", c.line));
-  return cur === undefined || (c.line_text !== null && cur !== c.line_text);
+  if (cur === undefined) return true;
+  if (c.line_text === null) return false;
+  if (c.start_line === null) return cur !== c.line_text;
+  // Multi-line: outdated once either end of the selected range changes.
+  const snap = c.line_text.split("\n");
+  const first = texts.get(lineKey(c.path, c.start_side ?? c.side ?? "new", c.start_line));
+  return first !== snap[0] || cur !== snap[snap.length - 1];
+}
+
+/** "+10 to +14" style label for a multi-line comment, or null for a single line. */
+function rangeLabel(c: Comment) {
+  if (c.start_line === null || c.line === null) return null;
+  const sign = (s: Side | null) => (s === "old" ? "-" : "+");
+  return `${sign(c.start_side)}${c.start_line} to ${sign(c.side)}${c.line}`;
 }
 
 function Conversation(props: {
@@ -267,7 +283,7 @@ function Conversation(props: {
                   }}
                 >
                   {r.path}
-                  {r.line !== null && `:${r.line}`}
+                  {r.line !== null && `:${r.start_line !== null ? `${r.start_line}-` : ""}${r.line}`}
                 </a>
                 {outdated && <span className="label">Outdated</span>}
                 {r.line_text !== null && <pre className="snippet">{r.line_text}</pre>}
@@ -312,7 +328,13 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
     saveViewed(props.prId, next);
     setCollapsed({ ...collapsed, [path]: !isViewed(i) });
   };
-  const [composer, setComposer] = useState<string | null>(null);
+  const [sel, setSel] = useState<LineSelection | null>(null);
+  // A drag that started on a "+" ends wherever the mouse is released.
+  useEffect(() => {
+    const up = () => setSel((s) => (s?.dragging ? { ...s, dragging: false } : s));
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
 
   const threadsByLine = useMemo(() => {
     const texts = lineTexts(files);
@@ -385,8 +407,8 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
                     threadsByLine={threadsByLine}
                     comments={comments}
                     actions={actions}
-                    composer={composer}
-                    setComposer={setComposer}
+                    sel={sel?.path === path ? sel : null}
+                    setSel={setSel}
                   />
                 ))}
             </div>
@@ -539,11 +561,21 @@ function FileDiffTable(props: {
   threadsByLine: Map<string, Comment[]>;
   comments: Comment[];
   actions: Actions;
-  composer: string | null;
-  setComposer: (k: string | null) => void;
+  sel: LineSelection | null;
+  setSel: (s: LineSelection | null) => void;
 }) {
-  const { file: f, threadsByLine, comments, actions, composer, setComposer } = props;
+  const { file: f, threadsByLine, comments, actions, sel, setSel } = props;
   const path = filePath(f);
+  // Index of the hunk header each line belongs to; a selection can't cross hunks.
+  const hunkOf = useMemo(() => {
+    let h = 0;
+    return f.lines.map((l, i) => (l.kind === "hunk" ? (h = i) : h));
+  }, [f]);
+  const lo = sel ? Math.min(sel.anchor, sel.head) : -1;
+  const hi = sel ? Math.max(sel.anchor, sel.head) : -1;
+  const extendable = (i: number) => sel !== null && hunkOf[i] === hunkOf[sel.anchor];
+  const select = (i: number, extend: boolean, dragging: boolean) =>
+    setSel(extend && extendable(i) ? { ...sel!, head: i, dragging } : { path, anchor: i, head: i, dragging });
   // Full new-side file, fetched on the first expand.
   const [content, setContent] = useState<string[] | null>(null);
   const [loadErr, setLoadErr] = useState("");
@@ -582,7 +614,6 @@ function FileDiffTable(props: {
       comments={comments}
       actions={actions}
       composing={false}
-      onAdd={() => {}}
       onCancel={() => {}}
       onSubmit={async () => {}}
     />
@@ -632,15 +663,31 @@ function FileDiffTable(props: {
         key={i}
         line={l}
         html={props.html?.[i]}
-        onAdd={() => setComposer(k)}
+        selected={i >= lo && i <= hi}
+        onAddMouseDown={(shift) => select(i, shift, !shift)}
+        onNumClick={(shift) => select(i, shift, false)}
+        onMouseEnter={() => sel?.dragging && extendable(i) && setSel({ ...sel, head: i })}
         threads={threadsByLine.get(k) ?? []}
         comments={comments}
         actions={actions}
-        composing={composer === k}
-        onCancel={() => setComposer(null)}
+        composing={i === hi && !sel!.dragging}
+        composeLabel={lo < hi ? `Commenting on ${hi - lo + 1} lines` : undefined}
+        onCancel={() => setSel(null)}
         onSubmit={async (body) => {
-          await actions.addComment({ body, path, line: lineNo, side, line_text: l.text });
-          setComposer(null);
+          const start = f.lines[lo];
+          const startSide: Side = start.kind === "del" ? "old" : "new";
+          await actions.addComment({
+            body,
+            path,
+            line: lineNo,
+            side,
+            ...(lo < i && { start_line: (startSide === "old" ? start.oldNo : start.newNo)!, start_side: startSide }),
+            line_text: f.lines
+              .slice(lo, i + 1)
+              .map((x) => x.text)
+              .join("\n"),
+          });
+          setSel(null);
         }}
       />,
     );
@@ -685,21 +732,42 @@ function DiffRow(props: {
   threads: Comment[];
   comments: Comment[];
   actions: Actions;
+  selected?: boolean;
   composing: boolean;
-  onAdd: () => void;
+  composeLabel?: string;
+  /** Mouse down on "+": starts a drag selection, or extends the current one with shift. */
+  onAddMouseDown?: (shift: boolean) => void;
+  /** Click on a line number: selects the line, or extends the selection with shift. */
+  onNumClick?: (shift: boolean) => void;
+  onMouseEnter?: () => void;
   onCancel: () => void;
   onSubmit: (body: string) => Promise<void>;
 }) {
   const { line: l, threads, composing } = props;
   const sign = l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ";
+  const numClick = props.onNumClick && ((e: React.MouseEvent) => props.onNumClick!(e.shiftKey));
   return (
     <>
-      <tr className={`line ${l.kind} ${props.expanded ? "expanded" : ""}`}>
-        <td className="num">{l.oldNo ?? ""}</td>
-        <td className="num">{l.newNo ?? ""}</td>
+      <tr
+        className={`line ${l.kind} ${props.expanded ? "expanded" : ""} ${props.selected ? "selected" : ""}`}
+        onMouseEnter={props.onMouseEnter}
+      >
+        <td className={`num ${numClick ? "clickable" : ""}`} onClick={numClick}>
+          {l.oldNo ?? ""}
+        </td>
+        <td className={`num ${numClick ? "clickable" : ""}`} onClick={numClick}>
+          {l.newNo ?? ""}
+        </td>
         <td className="code">
-          {!props.expanded && (
-            <button className="add-comment" title="Add a comment" onClick={props.onAdd}>
+          {props.onAddMouseDown && (
+            <button
+              className="add-comment"
+              title="Add a comment (drag or shift-click to select lines)"
+              onMouseDown={(e) => {
+                e.preventDefault(); // don't start a text selection while dragging
+                props.onAddMouseDown!(e.shiftKey);
+              }}
+            >
               +
             </button>
           )}
@@ -715,6 +783,7 @@ function DiffRow(props: {
             ))}
             {composing && (
               <div className="box inline-composer">
+                {props.composeLabel && <div className="muted small compose-label">{props.composeLabel}</div>}
                 <CommentForm
                   autoFocus
                   placeholder="Leave a comment"
@@ -737,8 +806,10 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
   useEffect(() => setOpen(!root.resolved), [root.resolved]);
   const replies = comments.filter((c) => c.parent_id === root.id);
 
+  const lines = rangeLabel(root);
   return (
     <div className={`box thread ${root.resolved ? "resolved" : ""}`}>
+      {lines && <div className="thread-lines muted small">Comment on lines {lines}</div>}
       {root.resolved && (
         <div className="thread-resolved-bar" onClick={() => setOpen(!open)}>
           <span className="muted small">

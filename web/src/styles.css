@@ -7,6 +7,7 @@
   --hl-title: #8250df;
   --hl-type: #953800;
   --hl-tag: #116329;
+  --selected-bg: #fff8c5;
   --bg: #ffffff;
   --bg-subtle: #f6f8fa;
   --fg: #1f2328;
@@ -44,6 +45,7 @@
     --hl-title: #d2a8ff;
     --hl-type: #ffa657;
     --hl-tag: #7ee787;
+    --selected-bg: rgba(187, 128, 9, 0.25);
     color-scheme: dark;
   }
 }
@@ -254,3 +256,11 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 }
 .expander button:hover { background: var(--accent); color: #fff; }
 .diff tr.expanded .code { background: var(--bg-subtle); }
+
+/* Multi-line selection. */
+.diff .num.clickable { cursor: pointer; }
+.diff .num.clickable:hover { color: var(--fg); }
+.diff tr.line.selected td { background: var(--selected-bg) !important; }
+.diff tr.line.selected .num { color: var(--fg); }
+.thread-lines { padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); }
+.compose-label { padding: 0 0 6px; }

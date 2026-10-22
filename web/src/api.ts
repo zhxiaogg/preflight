@@ -38,6 +38,9 @@ export type Comment = {
   path: string | null;
   line: number | null;
   side: Side | null;
+  /** First line of a multi-line comment (`line` is the last). */
+  start_line: number | null;
+  start_side: Side | null;
   line_text: string | null;
   resolved: boolean;
   created_at: number;
@@ -49,6 +52,8 @@ export type NewComment = {
   path?: string;
   line?: number;
   side?: Side;
+  start_line?: number;
+  start_side?: Side;
   line_text?: string;
 };
 
