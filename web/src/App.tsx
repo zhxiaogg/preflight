@@ -144,7 +144,14 @@ function PrPage({ id }: { id: number }) {
         <span className={`state-badge ${pr.state}`}>{pr.state === "open" ? "Open" : "Closed"}</span>
         <span className="muted">
           wants to merge {detail.commits.length} commit{detail.commits.length === 1 ? "" : "s"} into{" "}
-          <span className="branch">{pr.base}</span> from <span className="branch">{pr.head}</span> · {pr.repo}
+          <span className={`branch ${detail.base_missing ? "deleted" : ""}`}>{pr.base}</span> from{" "}
+          <span className={`branch ${detail.head_missing ? "deleted" : ""}`}>{pr.head}</span>
+          {(detail.base_missing || detail.head_missing) && (
+            <span className="label" title="Showing the last commit seen before the branch was deleted">
+              branch deleted
+            </span>
+          )}{" "}
+          · {pr.repo}
         </span>
       </div>
       {latestHead && latestHead !== detail.head_sha && (

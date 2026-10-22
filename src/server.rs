@@ -56,20 +56,64 @@ async fn create_pr(Json(b): Json<CreatePr>) -> ApiResult {
     Ok(Json(json!(crate::create_pr(&b.repo, &b.base, &b.head, &b.title, &b.description)?)))
 }
 
+/// Commits a PR currently points at.
+struct Refs {
+    base: String,
+    head: String,
+    base_missing: bool,
+    head_missing: bool,
+}
+
+/// Resolves the PR's branches, falling back to the last seen commit when a branch was deleted
+/// (like GitHub, a PR stays viewable after its branch is gone).
+fn resolve(pr: &db::Pr) -> Result<Refs, ApiError> {
+    // A closed PR is frozen at the commits it had when it was closed.
+    if let (true, Some(base), Some(head)) = (pr.state == "closed", &pr.base_sha, &pr.head_sha) {
+        return Ok(Refs {
+            base: base.clone(),
+            head: head.clone(),
+            base_missing: git::rev_parse(&pr.repo, &pr.base).is_err(),
+            head_missing: git::rev_parse(&pr.repo, &pr.head).is_err(),
+        });
+    }
+    let pick = |branch: &str, last: &Option<String>| -> anyhow::Result<(String, bool)> {
+        match git::rev_parse(&pr.repo, branch) {
+            Ok(sha) => Ok((sha, false)),
+            Err(e) => last
+                .clone()
+                .map(|sha| (sha, true))
+                .ok_or_else(|| e.context(format!("branch '{branch}' no longer exists"))),
+        }
+    };
+    let (base, base_missing) = pick(&pr.base, &pr.base_sha)?;
+    let (head, head_missing) = pick(&pr.head, &pr.head_sha)?;
+    if pr.base_sha.as_deref() != Some(base.as_str()) || pr.head_sha.as_deref() != Some(head.as_str()) {
+        db::set_shas(&db::open()?, pr.id, &base, &head)?;
+    }
+    Ok(Refs { base, head, base_missing, head_missing })
+}
+
 async fn get_pr(Path(id): Path<i64>) -> ApiResult {
     let pr = load_pr(id)?;
-    let base_sha = git::rev_parse(&pr.repo, &pr.base)?;
-    let head_sha = git::rev_parse(&pr.repo, &pr.head)?;
-    let commits: Vec<Value> = git::commits(&pr.repo, &pr.base, &pr.head)?
+    let refs = resolve(&pr)?;
+    let commits: Vec<Value> = git::commits(&pr.repo, &refs.base, &refs.head)?
         .into_iter()
         .map(|(sha, subject)| json!({ "sha": sha, "subject": subject }))
         .collect();
-    Ok(Json(json!({ "pr": pr, "base_sha": base_sha, "head_sha": head_sha, "commits": commits })))
+    Ok(Json(json!({
+        "pr": pr,
+        "base_sha": refs.base,
+        "head_sha": refs.head,
+        "base_missing": refs.base_missing,
+        "head_missing": refs.head_missing,
+        "commits": commits,
+    })))
 }
 
 async fn get_diff(Path(id): Path<i64>) -> ApiResult {
     let pr = load_pr(id)?;
-    Ok(Json(json!({ "diff": git::diff(&pr.repo, &pr.base, &pr.head)? })))
+    let refs = resolve(&pr)?;
+    Ok(Json(json!({ "diff": git::diff(&pr.repo, &refs.base, &refs.head)? })))
 }
 
 #[derive(Deserialize)]
@@ -80,7 +124,8 @@ struct FileQuery {
 /// Full file at the PR's head, for expanding hidden context lines in the diff.
 async fn get_file(Path(id): Path<i64>, Query(q): Query<FileQuery>) -> ApiResult {
     let pr = load_pr(id)?;
-    Ok(Json(json!({ "content": git::show(&pr.repo, &pr.head, &q.path)? })))
+    let refs = resolve(&pr)?;
+    Ok(Json(json!({ "content": git::show(&pr.repo, &refs.head, &q.path)? })))
 }
 
 async fn list_comments(Path(id): Path<i64>) -> ApiResult {
@@ -98,8 +143,10 @@ struct SetState {
 }
 
 async fn set_pr_state(Path(id): Path<i64>, Json(b): Json<SetState>) -> ApiResult {
-    load_pr(id)?;
-    db::set_pr_state(&db::open()?, id, &b.state)?;
+    let pr = load_pr(id)?;
+    let conn = db::open()?;
+    crate::snapshot_shas(&conn, &pr)?;
+    db::set_pr_state(&conn, id, &b.state)?;
     Ok(Json(json!({ "ok": true })))
 }
 

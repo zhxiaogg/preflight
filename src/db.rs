@@ -14,6 +14,9 @@ pub struct Pr {
     pub description: String,
     /// "open" or "closed".
     pub state: String,
+    /// Last commits seen for base/head, so the PR stays viewable after a branch is deleted.
+    pub base_sha: Option<String>,
+    pub head_sha: Option<String>,
     pub created_at: i64,
 }
 
@@ -109,6 +112,8 @@ pub fn open() -> Result<Connection> {
         ("prs", "state", "ALTER TABLE prs ADD COLUMN state TEXT NOT NULL DEFAULT 'open'"),
         ("comments", "start_line", "ALTER TABLE comments ADD COLUMN start_line INTEGER"),
         ("comments", "start_side", "ALTER TABLE comments ADD COLUMN start_side TEXT"),
+        ("prs", "base_sha", "ALTER TABLE prs ADD COLUMN base_sha TEXT"),
+        ("prs", "head_sha", "ALTER TABLE prs ADD COLUMN head_sha TEXT"),
     ] {
         let exists = conn
             .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
@@ -124,7 +129,7 @@ fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-const PR_COLS: &str = "id, repo, base, head, title, description, state, created_at";
+const PR_COLS: &str = "id, repo, base, head, title, description, state, base_sha, head_sha, created_at";
 const REVIEW_COLS: &str = "id, pr_id, author, state, body, created_at";
 const COMMENT_COLS: &str = "id, pr_id, parent_id, author, body, path, line, side, start_line, start_side, \
                             line_text, resolved, created_at";
@@ -138,7 +143,9 @@ fn pr_row(r: &Row) -> rusqlite::Result<Pr> {
         title: r.get(4)?,
         description: r.get(5)?,
         state: r.get(6)?,
-        created_at: r.get(7)?,
+        base_sha: r.get(7)?,
+        head_sha: r.get(8)?,
+        created_at: r.get(9)?,
     })
 }
 
@@ -177,6 +184,14 @@ pub fn create_pr(c: &Connection, repo: &str, base: &str, head: &str, title: &str
         params![repo, base, head, title, desc, now()],
     )?;
     get_pr(c, c.last_insert_rowid())?.context("pr vanished after insert")
+}
+
+pub fn set_shas(c: &Connection, id: i64, base_sha: &str, head_sha: &str) -> Result<()> {
+    c.execute(
+        "UPDATE prs SET base_sha = ?1, head_sha = ?2 WHERE id = ?3",
+        params![base_sha, head_sha, id],
+    )?;
+    Ok(())
 }
 
 pub fn get_pr(c: &Connection, id: i64) -> Result<Option<Pr>> {

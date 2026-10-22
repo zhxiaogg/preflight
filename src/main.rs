@@ -91,9 +91,12 @@ fn pr_url(id: i64) -> String {
 
 pub fn create_pr(repo: &str, base: &str, head: &str, title: &str, desc: &str) -> Result<db::Pr> {
     let root = git::toplevel(repo).with_context(|| format!("{repo} is not a git repo"))?;
-    git::rev_parse(&root, base).with_context(|| format!("unknown base '{base}'"))?;
-    git::rev_parse(&root, head).with_context(|| format!("unknown head '{head}'"))?;
-    db::create_pr(&db::open()?, &root, base, head, title, desc)
+    let base_sha = git::rev_parse(&root, base).with_context(|| format!("unknown base '{base}'"))?;
+    let head_sha = git::rev_parse(&root, head).with_context(|| format!("unknown head '{head}'"))?;
+    let conn = db::open()?;
+    let pr = db::create_pr(&conn, &root, base, head, title, desc)?;
+    db::set_shas(&conn, pr.id, &base_sha, &head_sha)?;
+    load_pr(&conn, pr.id)
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -105,9 +108,21 @@ fn load_pr(conn: &Connection, pr_id: i64) -> Result<db::Pr> {
     db::get_pr(conn, pr_id)?.with_context(|| format!("PR #{pr_id} not found"))
 }
 
+/// Records the branches' current commits (where they still exist), e.g. right before closing so
+/// the closed PR keeps showing what was reviewed.
+pub fn snapshot_shas(conn: &Connection, pr: &db::Pr) -> Result<()> {
+    let base = git::rev_parse(&pr.repo, &pr.base).ok().or_else(|| pr.base_sha.clone());
+    let head = git::rev_parse(&pr.repo, &pr.head).ok().or_else(|| pr.head_sha.clone());
+    if let (Some(base), Some(head)) = (base, head) {
+        db::set_shas(conn, pr.id, &base, &head)?;
+    }
+    Ok(())
+}
+
 fn set_state(pr_id: i64, state: &str) -> Result<()> {
     let conn = db::open()?;
-    load_pr(&conn, pr_id)?;
+    let pr = load_pr(&conn, pr_id)?;
+    snapshot_shas(&conn, &pr)?;
     db::set_pr_state(&conn, pr_id, state)?;
     println!("PR #{pr_id} is now {state}");
     Ok(())

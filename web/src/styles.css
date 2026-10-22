@@ -264,3 +264,5 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .diff tr.line.selected .num { color: var(--fg); }
 .thread-lines { padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); }
 .compose-label { padding: 0 0 6px; }
+
+.branch.deleted { text-decoration: line-through; }

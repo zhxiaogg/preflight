@@ -24,6 +24,9 @@ export type PrDetail = {
   pr: Pr;
   base_sha: string;
   head_sha: string;
+  /** The branch was deleted; the PR is shown at the last commit seen. */
+  base_missing: boolean;
+  head_missing: boolean;
   commits: { sha: string; subject: string }[];
 };
 
