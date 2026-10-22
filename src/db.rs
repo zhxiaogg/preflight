@@ -49,11 +49,11 @@ fn default_author() -> String {
 }
 
 pub fn db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("LPR_DB") {
+    if let Ok(p) = std::env::var("PREFLIGHT_DB") {
         return p.into();
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".local-pr").join("lpr.db")
+    PathBuf::from(home).join(".preflight").join("preflight.db")
 }
 
 pub fn open() -> Result<Connection> {

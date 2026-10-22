@@ -17,7 +17,7 @@ export function App() {
   return (
     <>
       <header className="topbar">
-        <a href="/">Local PRs</a>
+        <a href="/">Preflight</a>
       </header>
       <main className="container">{m ? <PrPage id={Number(m[1])} /> : <PrList />}</main>
     </>
@@ -34,10 +34,10 @@ function PrList() {
   if (!prs) return <div className="muted">Loading…</div>;
   return (
     <div className="box">
-      <div className="box-header">{prs.length} local pull requests</div>
+      <div className="box-header">{prs.length} preflight PRs</div>
       {prs.length === 0 && (
         <div className="box-row muted">
-          No PRs yet. Create one with <code>lpr create --repo . --base main --head my-branch --title "…"</code>
+          No PRs yet. Create one with <code>preflight create --repo . --base main --head my-branch --title "…"</code>
         </div>
       )}
       {prs.map((p) => (

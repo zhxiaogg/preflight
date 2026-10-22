@@ -1,11 +1,11 @@
 [package]
-name = "local-pr"
+name = "preflight"
 version = "0.1.0"
 edition = "2021"
-description = "Local pull requests: let humans review LLM agent work in a GitHub-like UI before opening a remote PR"
+description = "Preflight PRs: let humans review LLM agent work in a GitHub-like UI before opening a remote PR"
 
 [[bin]]
-name = "lpr"
+name = "preflight"
 path = "src/main.rs"
 
 [dependencies]

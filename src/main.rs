@@ -5,9 +5,9 @@ mod server;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-/// Local pull requests: review an agent's branch in a GitHub-like web UI before pushing.
+/// Preflight PRs: review an agent's branch in a GitHub-like web UI before pushing.
 #[derive(Parser)]
-#[command(name = "lpr", version)]
+#[command(name = "preflight", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -17,10 +17,10 @@ struct Cli {
 enum Cmd {
     /// Start the review web server (http://localhost:<port>)
     Serve {
-        #[arg(long, env = "LPR_PORT", default_value_t = 7777)]
+        #[arg(long, env = "PREFLIGHT_PORT", default_value_t = 7777)]
         port: u16,
     },
-    /// Open a local PR comparing <head> against <base>
+    /// Open a preflight PR comparing <head> against <base>
     Create {
         /// Path to the git repo (any directory inside it)
         #[arg(long, default_value = ".")]
@@ -38,7 +38,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// List local PRs
+    /// List preflight PRs
     List {
         #[arg(long)]
         json: bool,
@@ -64,7 +64,7 @@ enum Cmd {
 }
 
 fn port() -> u16 {
-    std::env::var("LPR_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7777)
+    std::env::var("PREFLIGHT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(7777)
 }
 
 fn pr_url(id: i64) -> String {
@@ -91,7 +91,7 @@ fn main() -> Result<()> {
             if json {
                 return print_json(&serde_json::json!({ "pr": pr, "url": pr_url(pr.id) }));
             }
-            println!("Created local PR #{}: {}\n{}", pr.id, pr.title, pr_url(pr.id));
+            println!("Created preflight PR #{}: {}\n{}", pr.id, pr.title, pr_url(pr.id));
             Ok(())
         }
         Cmd::List { json } => {

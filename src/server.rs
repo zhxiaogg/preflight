@@ -123,7 +123,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .fallback(static_handler);
     // Bind to loopback only: this exposes your local repos' contents.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    println!("lpr serving on http://localhost:{port}  (db: {})", db::db_path().display());
+    println!("preflight serving on http://localhost:{port}  (db: {})", db::db_path().display());
     axum::serve(listener, app).await?;
     Ok(())
 }

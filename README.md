@@ -1,7 +1,7 @@
-# local-pr (`lpr`)
+# preflight
 
-Local pull requests for reviewing LLM agent work *before* it becomes a remote PR.
-The agent opens a "PR" between two local branches, you review it in a GitHub-like
+Preflight PRs: review LLM agent work locally *before* it becomes a remote PR.
+The agent opens a "preflight PR" between two local branches, you review it in a GitHub-like
 web UI on localhost, and the agent reads your comments back via the CLI.
 
 ## Build
@@ -9,7 +9,7 @@ web UI on localhost, and the agent reads your comments back via the CLI.
 Requires Rust and Node.js. `cargo build` also builds the React app (`web/`) and embeds it in the binary.
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/zhxiaogg/preflight.git
 ```
 
 ## Use
@@ -17,38 +17,40 @@ cargo install --path .
 Start the review server (keep it running):
 
 ```bash
-lpr serve            # http://localhost:7777  (--port or LPR_PORT to change)
+preflight serve      # http://localhost:7777  (--port or PREFLIGHT_PORT to change)
 ```
 
-Agent opens a local PR (diff is `base...head`, computed live, so new commits show up on reload):
+Agent opens a preflight PR (diff is `base...head`, computed live, so new commits show up on reload):
 
 ```bash
-lpr create --repo /path/to/repo --base main --head my-feature --title "Add X" --description "Why…"
+preflight create --repo /path/to/repo --base main --head my-feature --title "Add X" --description "Why…"
 ```
 
-Review in the browser: hover a diff line → click `+` to comment; reply to or resolve threads.
+Review in the browser: browse files in the tree on the left, hover a diff line → click `+` to comment,
+reply to or resolve threads.
 
 Agent reads feedback and responds:
 
 ```bash
-lpr comments 1 --unresolved          # human-readable, includes file:line and the line's code
-lpr comments 1 --unresolved --json   # threads as JSON
-lpr reply 3 "Fixed in abc123"
-lpr resolve 3
-lpr list
+preflight comments 1 --unresolved          # human-readable, includes file:line and the line's code
+preflight comments 1 --unresolved --json   # threads as JSON
+preflight reply 3 "Fixed in abc123"
+preflight resolve 3
+preflight list
 ```
 
-State lives in SQLite at `~/.local-pr/lpr.db` (override with `LPR_DB`). The CLI works without the server running.
+State lives in SQLite at `~/.preflight/preflight.db` (override with `PREFLIGHT_DB`). The CLI works without the server running.
 
 ## Agent instructions snippet
 
 Paste into your agent's `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
-When you finish a change on a branch, open a local review instead of a remote PR:
-`lpr create --repo . --base main --head <branch> --title "<title>" --description "<summary>"`
-and share the printed URL. To get feedback run `lpr comments <id> --unresolved`.
-For each thread: make the fix, commit it to the same branch, then `lpr reply <comment-id> "<what you did>"`.
+A "preflight PR" is a local review done with the `preflight` CLI, not a GitHub PR.
+When asked to open a preflight PR for a branch:
+`preflight create --repo . --base main --head <branch> --title "<title>" --description "<summary>"`
+and share the printed URL. To get feedback run `preflight comments <id> --unresolved`.
+For each thread: make the fix, commit it to the same branch, then `preflight reply <comment-id> "<what you did>"`.
 Don't resolve threads yourself unless asked; the reviewer resolves them.
 ```
 
