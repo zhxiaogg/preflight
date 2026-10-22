@@ -547,9 +547,12 @@ function FileDiffTable(props: {
   // Full new-side file, fetched on the first expand.
   const [content, setContent] = useState<string[] | null>(null);
   const [loadErr, setLoadErr] = useState("");
-  // Lines revealed above each hunk (keyed by the hunk's index in f.lines) and after the last one.
-  const [above, setAbove] = useState<Record<number, number>>({});
-  const [below, setBelow] = useState(0);
+  // Lines revealed in the gap before each hunk (keyed by the hunk's index in f.lines): from the
+  // top of the gap ("down", continuing the previous hunk) and from the bottom ("up"). `tail` is
+  // revealed after the last hunk.
+  const [down, setDown] = useState<Record<number, number>>({});
+  const [up, setUp] = useState<Record<number, number>>({});
+  const [tail, setTail] = useState(0);
   const contentHtml = useMemo(() => content && highlightText(path, content.join("\n")), [content, path]);
   const canExpand = f.status === "modified" || f.status === "renamed";
 
@@ -565,9 +568,9 @@ function FileDiffTable(props: {
       throw e;
     }
   };
-  const expandAbove = (hunk: number, n: number) =>
-    ensureContent().then(() => setAbove((a) => ({ ...a, [hunk]: (a[hunk] ?? 0) + n })), () => {});
-  const expandBelow = () => ensureContent().then(() => setBelow((b) => b + EXPAND_STEP), () => {});
+  const expand = (set: typeof setUp, hunk: number) =>
+    ensureContent().then(() => set((m) => ({ ...m, [hunk]: (m[hunk] ?? 0) + EXPAND_STEP })), () => {});
+  const expandTail = () => ensureContent().then(() => setTail((t) => t + EXPAND_STEP), () => {});
 
   const contextRow = (newNo: number, oldNo: number) => (
     <DiffRow
@@ -593,30 +596,30 @@ function FileDiffTable(props: {
       const start = l.newNo!;
       const delta = l.newNo! - l.oldNo!;
       const gap = canExpand ? start - 1 - lastNew : 0;
-      const shown = Math.min(above[i] ?? 0, gap);
-      const hidden = gap - shown;
+      const downShown = Math.min(down[i] ?? 0, gap);
+      const upShown = Math.min(up[i] ?? 0, gap - downShown);
+      const hidden = gap - downShown - upShown;
+      for (let n = lastNew + 1; n <= lastNew + downShown; n++) rows.push(contextRow(n, n - delta));
       // Once a gap is fully expanded the hunks merge and the header disappears, as on GitHub.
       if (hidden > 0 || (i === 0 && gap === 0))
         rows.push(
           <tr key={`h${i}`} className="hunk">
             <td colSpan={2} className="expander">
+              {hidden > 0 && lastNew > 0 && (
+                <button title="Expand down" onClick={() => expand(setDown, i)}>
+                  ↓
+                </button>
+              )}
               {hidden > 0 && (
-                <>
-                  <button title="Expand up" onClick={() => expandAbove(i, EXPAND_STEP)}>
-                    ↑
-                  </button>
-                  {hidden > EXPAND_STEP && (
-                    <button title="Expand all" onClick={() => expandAbove(i, hidden)}>
-                      ↕
-                    </button>
-                  )}
-                </>
+                <button title="Expand up" onClick={() => expand(setUp, i)}>
+                  ↑
+                </button>
               )}
             </td>
             <td>{l.text}</td>
           </tr>,
         );
-      for (let n = start - shown; n < start; n++) rows.push(contextRow(n, n - delta));
+      for (let n = start - upShown; n < start; n++) rows.push(contextRow(n, n - delta));
       return;
     }
     if (l.newNo !== undefined) lastNew = l.newNo;
@@ -645,14 +648,14 @@ function FileDiffTable(props: {
 
   // Lines after the last hunk. Until the file is fetched we can't know whether any exist.
   if (canExpand) {
-    const tail = content ? content.length - lastNew : Infinity;
-    const shown = Math.min(below, tail);
+    const remaining = content ? content.length - lastNew : Infinity;
+    const shown = Math.min(tail, remaining);
     for (let n = lastNew + 1; n <= lastNew + shown; n++) rows.push(contextRow(n, n - (lastNew - lastOld)));
-    if (tail - shown > 0)
+    if (remaining - shown > 0)
       rows.push(
         <tr key="tail" className="hunk">
           <td colSpan={2} className="expander">
-            <button title="Expand down" onClick={expandBelow}>
+            <button title="Expand down" onClick={expandTail}>
               ↓
             </button>
           </td>

@@ -27,7 +27,7 @@ preflight create --repo /path/to/repo --base main --head my-feature --title "Add
 ```
 
 Review in the browser like on GitHub: syntax-highlighted diffs with a file tree, `+` on a line to comment,
-expandable context around hunks (↑ ↓ ↕), markdown in descriptions and comments, "Viewed" checkboxes, reply/resolve threads, and **Review changes**
+expandable context around hunks (↑ expand up, ↓ expand down), markdown in descriptions and comments, "Viewed" checkboxes, reply/resolve threads, and **Review changes**
 (Comment / Approve / Request changes). A banner appears when the agent pushes new commits.
 
 Agent reads feedback and responds:
