@@ -22,6 +22,11 @@ pub fn diff(repo: &str, base: &str, head: &str) -> Result<String> {
     git(repo, &["diff", "--no-color", "--no-ext-diff", "-M", &format!("{base}...{head}")])
 }
 
+/// Contents of `path` at `rev` (used to expand unchanged context around hunks).
+pub fn show(repo: &str, rev: &str, path: &str) -> Result<String> {
+    git(repo, &["show", &format!("{rev}:{path}")])
+}
+
 /// Commits on `head` not on `base`, newest first, as (sha, subject).
 pub fn commits(repo: &str, base: &str, head: &str) -> Result<Vec<(String, String)>> {
     let out = git(repo, &["log", "--format=%h%x09%s", &format!("{base}..{head}")])?;

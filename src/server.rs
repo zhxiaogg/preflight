@@ -1,9 +1,9 @@
 use crate::{db, git};
 use axum::{
-    extract::Path,
+    extract::{Path, Query},
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use rust_embed::Embed;
@@ -56,20 +56,76 @@ async fn create_pr(Json(b): Json<CreatePr>) -> ApiResult {
     Ok(Json(json!(crate::create_pr(&b.repo, &b.base, &b.head, &b.title, &b.description)?)))
 }
 
+/// Commits a PR currently points at.
+struct Refs {
+    base: String,
+    head: String,
+    base_missing: bool,
+    head_missing: bool,
+}
+
+/// Resolves the PR's branches, falling back to the last seen commit when a branch was deleted
+/// (like GitHub, a PR stays viewable after its branch is gone).
+fn resolve(pr: &db::Pr) -> Result<Refs, ApiError> {
+    // A closed PR is frozen at the commits it had when it was closed.
+    if let (true, Some(base), Some(head)) = (pr.state == "closed", &pr.base_sha, &pr.head_sha) {
+        return Ok(Refs {
+            base: base.clone(),
+            head: head.clone(),
+            base_missing: git::rev_parse(&pr.repo, &pr.base).is_err(),
+            head_missing: git::rev_parse(&pr.repo, &pr.head).is_err(),
+        });
+    }
+    let pick = |branch: &str, last: &Option<String>| -> anyhow::Result<(String, bool)> {
+        match git::rev_parse(&pr.repo, branch) {
+            Ok(sha) => Ok((sha, false)),
+            Err(e) => last
+                .clone()
+                .map(|sha| (sha, true))
+                .ok_or_else(|| e.context(format!("branch '{branch}' no longer exists"))),
+        }
+    };
+    let (base, base_missing) = pick(&pr.base, &pr.base_sha)?;
+    let (head, head_missing) = pick(&pr.head, &pr.head_sha)?;
+    if pr.base_sha.as_deref() != Some(base.as_str()) || pr.head_sha.as_deref() != Some(head.as_str()) {
+        db::set_shas(&db::open()?, pr.id, &base, &head)?;
+    }
+    Ok(Refs { base, head, base_missing, head_missing })
+}
+
 async fn get_pr(Path(id): Path<i64>) -> ApiResult {
     let pr = load_pr(id)?;
-    let base_sha = git::rev_parse(&pr.repo, &pr.base)?;
-    let head_sha = git::rev_parse(&pr.repo, &pr.head)?;
-    let commits: Vec<Value> = git::commits(&pr.repo, &pr.base, &pr.head)?
+    let refs = resolve(&pr)?;
+    let commits: Vec<Value> = git::commits(&pr.repo, &refs.base, &refs.head)?
         .into_iter()
         .map(|(sha, subject)| json!({ "sha": sha, "subject": subject }))
         .collect();
-    Ok(Json(json!({ "pr": pr, "base_sha": base_sha, "head_sha": head_sha, "commits": commits })))
+    Ok(Json(json!({
+        "pr": pr,
+        "base_sha": refs.base,
+        "head_sha": refs.head,
+        "base_missing": refs.base_missing,
+        "head_missing": refs.head_missing,
+        "commits": commits,
+    })))
 }
 
 async fn get_diff(Path(id): Path<i64>) -> ApiResult {
     let pr = load_pr(id)?;
-    Ok(Json(json!({ "diff": git::diff(&pr.repo, &pr.base, &pr.head)? })))
+    let refs = resolve(&pr)?;
+    Ok(Json(json!({ "diff": git::diff(&pr.repo, &refs.base, &refs.head)? })))
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+/// Full file at the PR's head, for expanding hidden context lines in the diff.
+async fn get_file(Path(id): Path<i64>, Query(q): Query<FileQuery>) -> ApiResult {
+    let pr = load_pr(id)?;
+    let refs = resolve(&pr)?;
+    Ok(Json(json!({ "content": git::show(&pr.repo, &refs.head, &q.path)? })))
 }
 
 async fn list_comments(Path(id): Path<i64>) -> ApiResult {
@@ -82,6 +138,66 @@ async fn add_comment(Path(id): Path<i64>, Json(n): Json<db::NewComment>) -> ApiR
 }
 
 #[derive(Deserialize)]
+struct SetState {
+    state: String,
+}
+
+async fn set_pr_state(Path(id): Path<i64>, Json(b): Json<SetState>) -> ApiResult {
+    let pr = load_pr(id)?;
+    let conn = db::open()?;
+    crate::snapshot_shas(&conn, &pr)?;
+    db::set_pr_state(&conn, id, &b.state, "user")?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn list_reviews(Path(id): Path<i64>) -> ApiResult {
+    Ok(Json(json!(db::list_reviews(&db::open()?, id)?)))
+}
+
+#[derive(Deserialize)]
+struct NewReview {
+    state: String,
+    #[serde(default)]
+    body: String,
+}
+
+async fn add_review(Path(id): Path<i64>, Json(b): Json<NewReview>) -> ApiResult {
+    load_pr(id)?;
+    Ok(Json(json!(db::add_review(&db::open()?, id, "user", &b.state, &b.body)?)))
+}
+
+/// Loads a comment the reviewer may change: the web UI acts as "user", and agents' comments are theirs.
+fn own_comment(conn: &rusqlite::Connection, id: i64) -> Result<db::Comment, ApiError> {
+    let c = db::get_comment(conn, id)?.ok_or_else(|| not_found("comment"))?;
+    if c.author != "user" {
+        return Err(ApiError(StatusCode::FORBIDDEN, "you can only change your own comments".into()));
+    }
+    Ok(c)
+}
+
+#[derive(Deserialize)]
+struct EditComment {
+    body: String,
+}
+
+async fn edit_comment(Path(id): Path<i64>, Json(b): Json<EditComment>) -> ApiResult {
+    let conn = db::open()?;
+    own_comment(&conn, id)?;
+    if b.body.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "comment body is empty".into()));
+    }
+    db::edit_comment(&conn, id, &b.body)?;
+    Ok(Json(json!(db::get_comment(&conn, id)?)))
+}
+
+async fn delete_comment(Path(id): Path<i64>) -> ApiResult {
+    let conn = db::open()?;
+    own_comment(&conn, id)?;
+    db::delete_comment(&conn, id, "user")?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
 struct Resolve {
     resolved: bool,
 }
@@ -89,7 +205,7 @@ struct Resolve {
 async fn resolve_comment(Path(id): Path<i64>, Json(r): Json<Resolve>) -> ApiResult {
     let conn = db::open()?;
     db::get_comment(&conn, id)?.ok_or_else(|| not_found("comment"))?;
-    db::set_resolved(&conn, id, r.resolved)?;
+    db::set_resolved(&conn, id, r.resolved, "user")?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -118,7 +234,11 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .route("/api/prs", get(list_prs).post(create_pr))
         .route("/api/prs/:id", get(get_pr))
         .route("/api/prs/:id/diff", get(get_diff))
+        .route("/api/prs/:id/file", get(get_file))
         .route("/api/prs/:id/comments", get(list_comments).post(add_comment))
+        .route("/api/prs/:id/reviews", get(list_reviews).post(add_review))
+        .route("/api/prs/:id/state", post(set_pr_state))
+        .route("/api/comments/:id", patch(edit_comment).delete(delete_comment))
         .route("/api/comments/:id/resolve", post(resolve_comment))
         .fallback(static_handler);
     // Bind to loopback only: this exposes your local repos' contents.

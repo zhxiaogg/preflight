@@ -4,6 +4,8 @@ mod server;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use rusqlite::Connection;
+use std::time::{Duration, Instant};
 
 /// Preflight PRs: review an agent's branch in a GitHub-like web UI before pushing.
 #[derive(Parser)]
@@ -38,17 +40,42 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// List preflight PRs
+    /// List open preflight PRs
     List {
+        /// Include closed PRs
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
-    /// Show review comments on a PR
+    /// Show the latest review and the comments on a PR
     Comments {
         pr_id: i64,
         /// Only show threads that are not resolved
         #[arg(long)]
         unresolved: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Block until the reviewer submits a review, then print it with the unresolved comments
+    Wait {
+        pr_id: i64,
+        /// Return on any reviewer activity (comment added/edited/deleted/resolved, review...)
+        /// and print what changed
+        #[arg(long)]
+        any: bool,
+        /// Give up after this many seconds (exit code 2)
+        #[arg(long)]
+        timeout: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show everything that changed on a PR, including edited and deleted comments
+    Events {
+        pr_id: i64,
+        /// Only events after this id (the cursor printed by the previous call)
+        #[arg(long, default_value_t = 0)]
+        since: i64,
         #[arg(long)]
         json: bool,
     },
@@ -61,6 +88,10 @@ enum Cmd {
     },
     /// Mark a comment thread resolved
     Resolve { comment_id: i64 },
+    /// Close a PR (e.g. after it was pushed and merged remotely)
+    Close { pr_id: i64 },
+    /// Reopen a closed PR
+    Reopen { pr_id: i64 },
 }
 
 fn port() -> u16 {
@@ -73,13 +104,188 @@ fn pr_url(id: i64) -> String {
 
 pub fn create_pr(repo: &str, base: &str, head: &str, title: &str, desc: &str) -> Result<db::Pr> {
     let root = git::toplevel(repo).with_context(|| format!("{repo} is not a git repo"))?;
-    git::rev_parse(&root, base).with_context(|| format!("unknown base '{base}'"))?;
-    git::rev_parse(&root, head).with_context(|| format!("unknown head '{head}'"))?;
-    db::create_pr(&db::open()?, &root, base, head, title, desc)
+    let base_sha = git::rev_parse(&root, base).with_context(|| format!("unknown base '{base}'"))?;
+    let head_sha = git::rev_parse(&root, head).with_context(|| format!("unknown head '{head}'"))?;
+    let conn = db::open()?;
+    let pr = db::create_pr(&conn, &root, base, head, title, desc)?;
+    db::set_shas(&conn, pr.id, &base_sha, &head_sha)?;
+    load_pr(&conn, pr.id)
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
+    Ok(())
+}
+
+fn load_pr(conn: &Connection, pr_id: i64) -> Result<db::Pr> {
+    db::get_pr(conn, pr_id)?.with_context(|| format!("PR #{pr_id} not found"))
+}
+
+/// Records the branches' current commits (where they still exist), e.g. right before closing so
+/// the closed PR keeps showing what was reviewed.
+pub fn snapshot_shas(conn: &Connection, pr: &db::Pr) -> Result<()> {
+    let base = git::rev_parse(&pr.repo, &pr.base).ok().or_else(|| pr.base_sha.clone());
+    let head = git::rev_parse(&pr.repo, &pr.head).ok().or_else(|| pr.head_sha.clone());
+    if let (Some(base), Some(head)) = (base, head) {
+        db::set_shas(conn, pr.id, &base, &head)?;
+    }
+    Ok(())
+}
+
+fn set_state(pr_id: i64, state: &str) -> Result<()> {
+    let conn = db::open()?;
+    let pr = load_pr(&conn, pr_id)?;
+    snapshot_shas(&conn, &pr)?;
+    db::set_pr_state(&conn, pr_id, state, "cli")?;
+    println!("PR #{pr_id} is now {state}");
+    Ok(())
+}
+
+fn review_label(state: &str) -> &str {
+    match state {
+        "approved" => "APPROVED",
+        "changes_requested" => "CHANGES REQUESTED",
+        _ => "COMMENTED",
+    }
+}
+
+fn comment_loc(c: &db::Comment) -> String {
+    match (&c.path, c.line) {
+        (Some(p), Some(l)) => match c.start_line {
+            Some(s) if s != l => format!("{p}:{s}-{l}"),
+            _ => format!("{p}:{l}"),
+        },
+        (Some(p), None) => p.clone(),
+        _ => "the conversation".into(),
+    }
+}
+
+fn indent(text: &str, prefix: &str) {
+    for l in text.lines() {
+        println!("{prefix}{l}");
+    }
+}
+
+/// Prints events with a cursor for the next call, as text or as one JSON object.
+fn print_events(pr_id: i64, events: &[db::Event], cursor: i64, json: bool) -> Result<()> {
+    if json {
+        return print_json(&serde_json::json!({ "events": events, "cursor": cursor }));
+    }
+    if events.is_empty() {
+        println!("No new activity.");
+    }
+    for e in events {
+        let comment: Option<db::Comment> = serde_json::from_value(e.data["comment"].clone()).ok();
+        let what = comment.as_ref().map_or(String::new(), |c| format!(" #{} on {}", c.id, comment_loc(c)));
+        match e.kind.as_str() {
+            "comment_added" => {
+                let c = comment.as_ref().unwrap();
+                let kind = if c.parent_id.is_some() { "replied" } else { "commented" };
+                println!("[{}] {} {kind}{what}", e.id, e.actor);
+                indent(&c.body, "    ");
+            }
+            "comment_edited" => {
+                println!("[{}] {} edited comment{what}", e.id, e.actor);
+                indent(e.data["old_body"].as_str().unwrap_or(""), "    was: ");
+                indent(&comment.as_ref().unwrap().body, "    now: ");
+            }
+            "comment_deleted" => {
+                let replies: Vec<db::Comment> =
+                    serde_json::from_value(e.data["deleted_replies"].clone()).unwrap_or_default();
+                let suffix = match replies.len() {
+                    0 => String::new(),
+                    1 => " and its reply".into(),
+                    n => format!(" and its {n} replies"),
+                };
+                println!("[{}] {} deleted comment{what}{suffix}", e.id, e.actor);
+                indent(&comment.as_ref().unwrap().body, "    was: ");
+                for r in &replies {
+                    indent(&r.body, &format!("    reply #{} {}: ", r.id, r.author));
+                }
+            }
+            "comment_resolved" => println!("[{}] {} resolved thread{what}", e.id, e.actor),
+            "comment_unresolved" => println!("[{}] {} unresolved thread{what}", e.id, e.actor),
+            "review_submitted" => {
+                let state = e.data["review"]["state"].as_str().unwrap_or("");
+                println!("[{}] {} submitted a review: {}", e.id, e.actor, review_label(state));
+                indent(e.data["review"]["body"].as_str().unwrap_or(""), "    ");
+            }
+            "pr_closed" => println!("[{}] {} closed the PR", e.id, e.actor),
+            "pr_reopened" => println!("[{}] {} reopened the PR", e.id, e.actor),
+            other => println!("[{}] {} {other}", e.id, e.actor),
+        }
+    }
+    println!("\nNext: preflight events {pr_id} --since {cursor}");
+    Ok(())
+}
+
+/// Prints the latest review and the comment threads, as text or as one JSON object.
+fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -> Result<()> {
+    let pr = load_pr(conn, pr_id)?;
+    let latest_review = db::list_reviews(conn, pr_id)?.pop();
+    let all = db::list_comments(conn, pr_id)?;
+    let roots: Vec<_> = all
+        .iter()
+        .filter(|c| c.parent_id.is_none() && !(unresolved && c.resolved))
+        .collect();
+    if json {
+        let threads: Vec<_> = roots
+            .iter()
+            .map(|r| {
+                let replies: Vec<_> = all.iter().filter(|c| c.parent_id == Some(r.id)).collect();
+                serde_json::json!({ "comment": r, "replies": replies })
+            })
+            .collect();
+        return print_json(&serde_json::json!({
+            "state": pr.state,
+            "latest_review": latest_review,
+            "threads": threads,
+            // Pass to `preflight events --since` to get only later changes.
+            "event_cursor": db::last_event_id(conn, pr_id)?,
+        }));
+    }
+    if pr.state != "open" {
+        println!("PR #{pr_id} is {}.\n", pr.state);
+    }
+    if let Some(r) = &latest_review {
+        println!("Latest review #{} [{}] — {}", r.id, review_label(&r.state), r.author);
+        for l in r.body.lines() {
+            println!("    {l}");
+        }
+        println!();
+    }
+    if roots.is_empty() {
+        println!("No comments.");
+    }
+    for r in roots {
+        let state = if r.resolved { "resolved" } else { "unresolved" };
+        let loc = match (&r.path, r.line) {
+            (Some(p), Some(l)) => {
+                let lines = match r.start_line {
+                    Some(s) if s != l => format!("{s}-{l}"),
+                    _ => l.to_string(),
+                };
+                format!("{p}:{lines} ({} side)", r.side.as_deref().unwrap_or("new"))
+            }
+            (Some(p), None) => p.clone(),
+            _ => "general".into(),
+        };
+        let edited = if r.updated_at.is_some() { " (edited)" } else { "" };
+        println!("#{} [{state}] {loc} — {}{edited}", r.id, r.author);
+        if let Some(t) = &r.line_text {
+            for l in t.lines() {
+                println!("    > {l}");
+            }
+        }
+        for l in r.body.lines() {
+            println!("    {l}");
+        }
+        for c in all.iter().filter(|c| c.parent_id == Some(r.id)) {
+            let edited = if c.updated_at.is_some() { " (edited)" } else { "" };
+            println!("    ↳ #{} {}{edited}: {}", c.id, c.author, c.body.replace('\n', "\n      "));
+        }
+        println!();
+    }
     Ok(())
 }
 
@@ -94,57 +300,51 @@ fn main() -> Result<()> {
             println!("Created preflight PR #{}: {}\n{}", pr.id, pr.title, pr_url(pr.id));
             Ok(())
         }
-        Cmd::List { json } => {
-            let prs = db::list_prs(&db::open()?)?;
+        Cmd::List { all, json } => {
+            let prs: Vec<_> = db::list_prs(&db::open()?)?
+                .into_iter()
+                .filter(|p| all || p.state == "open")
+                .collect();
             if json {
                 return print_json(&prs);
             }
             for p in prs {
-                println!("#{:<4} {}  ({} <- {})  {}", p.id, p.title, p.base, p.head, p.repo);
+                println!("#{:<4} [{}] {}  ({} <- {})  {}", p.id, p.state, p.title, p.base, p.head, p.repo);
             }
             Ok(())
         }
-        Cmd::Comments { pr_id, unresolved, json } => {
+        Cmd::Comments { pr_id, unresolved, json } => print_feedback(&db::open()?, pr_id, unresolved, json),
+        Cmd::Events { pr_id, since, json } => {
             let conn = db::open()?;
-            db::get_pr(&conn, pr_id)?.with_context(|| format!("PR #{pr_id} not found"))?;
-            let all = db::list_comments(&conn, pr_id)?;
-            let roots: Vec<_> = all
-                .iter()
-                .filter(|c| c.parent_id.is_none() && !(unresolved && c.resolved))
-                .collect();
-            if json {
-                let threads: Vec<_> = roots
-                    .iter()
-                    .map(|r| {
-                        let replies: Vec<_> = all.iter().filter(|c| c.parent_id == Some(r.id)).collect();
-                        serde_json::json!({ "comment": r, "replies": replies })
-                    })
-                    .collect();
-                return print_json(&threads);
-            }
-            if roots.is_empty() {
-                println!("No comments.");
-            }
-            for r in roots {
-                let state = if r.resolved { "resolved" } else { "unresolved" };
-                let loc = match (&r.path, r.line) {
-                    (Some(p), Some(l)) => format!("{p}:{l} ({} side)", r.side.as_deref().unwrap_or("new")),
-                    (Some(p), None) => p.clone(),
-                    _ => "general".into(),
-                };
-                println!("#{} [{state}] {loc} — {}", r.id, r.author);
-                if let Some(t) = &r.line_text {
-                    println!("    > {t}");
+            load_pr(&conn, pr_id)?;
+            let events = db::list_events(&conn, pr_id, since)?;
+            let cursor = events.last().map_or(since, |e| e.id);
+            print_events(pr_id, &events, cursor, json)
+        }
+        Cmd::Wait { pr_id, any, timeout, json } => {
+            let conn = db::open()?;
+            load_pr(&conn, pr_id)?;
+            let seen = db::list_reviews(&conn, pr_id)?.last().map_or(0, |r| r.id);
+            let seen_event = db::last_event_id(&conn, pr_id)?;
+            let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
+            let what = if any { "reviewer activity" } else { "a review" };
+            eprintln!("Waiting for {what} on {} …", pr_url(pr_id));
+            loop {
+                if any {
+                    let events = db::list_events(&conn, pr_id, seen_event)?;
+                    // Only the reviewer's actions in the web UI count; ignore the agent's own.
+                    if events.iter().any(|e| e.actor == "user") {
+                        return print_events(pr_id, &events, events.last().unwrap().id, json);
+                    }
+                } else if db::list_reviews(&conn, pr_id)?.last().is_some_and(|r| r.id > seen) {
+                    return print_feedback(&conn, pr_id, true, json);
                 }
-                for l in r.body.lines() {
-                    println!("    {l}");
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    eprintln!("Timed out waiting for a review.");
+                    std::process::exit(2);
                 }
-                for c in all.iter().filter(|c| c.parent_id == Some(r.id)) {
-                    println!("    ↳ #{} {}: {}", c.id, c.author, c.body.replace('\n', "\n      "));
-                }
-                println!();
+                std::thread::sleep(Duration::from_secs(1));
             }
-            Ok(())
         }
         Cmd::Reply { comment_id, body, author } => {
             let conn = db::open()?;
@@ -157,6 +357,8 @@ fn main() -> Result<()> {
                 path: None,
                 line: None,
                 side: None,
+                start_line: None,
+                start_side: None,
                 line_text: None,
             };
             let c = db::add_comment(&conn, parent.pr_id, &n)?;
@@ -166,9 +368,11 @@ fn main() -> Result<()> {
         Cmd::Resolve { comment_id } => {
             let conn = db::open()?;
             db::get_comment(&conn, comment_id)?.context("comment not found")?;
-            db::set_resolved(&conn, comment_id, true)?;
+            db::set_resolved(&conn, comment_id, true, "agent")?;
             println!("Resolved #{comment_id}");
             Ok(())
         }
+        Cmd::Close { pr_id } => set_state(pr_id, "closed"),
+        Cmd::Reopen { pr_id } => set_state(pr_id, "open"),
     }
 }
