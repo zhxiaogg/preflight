@@ -47,6 +47,7 @@ export type Comment = {
   line_text: string | null;
   resolved: boolean;
   created_at: number;
+  updated_at: number | null;
 };
 
 export type NewComment = {
@@ -84,6 +85,9 @@ export const api = {
     req<Review>(`/api/prs/${id}/reviews`, { method: "POST", body: JSON.stringify({ state, body }) }),
   setState: (id: number, state: Pr["state"]) =>
     req(`/api/prs/${id}/state`, { method: "POST", body: JSON.stringify({ state }) }),
+  editComment: (commentId: number, body: string) =>
+    req<Comment>(`/api/comments/${commentId}`, { method: "PATCH", body: JSON.stringify({ body }) }),
+  deleteComment: (commentId: number) => req(`/api/comments/${commentId}`, { method: "DELETE" }),
   resolve: (commentId: number, resolved: boolean) =>
     req(`/api/comments/${commentId}/resolve`, { method: "POST", body: JSON.stringify({ resolved }) }),
 };

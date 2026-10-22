@@ -60,9 +60,22 @@ enum Cmd {
     /// Block until the reviewer submits a review, then print it with the unresolved comments
     Wait {
         pr_id: i64,
+        /// Return on any reviewer activity (comment added/edited/deleted/resolved, review...)
+        /// and print what changed
+        #[arg(long)]
+        any: bool,
         /// Give up after this many seconds (exit code 2)
         #[arg(long)]
         timeout: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show everything that changed on a PR, including edited and deleted comments
+    Events {
+        pr_id: i64,
+        /// Only events after this id (the cursor printed by the previous call)
+        #[arg(long, default_value_t = 0)]
+        since: i64,
         #[arg(long)]
         json: bool,
     },
@@ -123,7 +136,7 @@ fn set_state(pr_id: i64, state: &str) -> Result<()> {
     let conn = db::open()?;
     let pr = load_pr(&conn, pr_id)?;
     snapshot_shas(&conn, &pr)?;
-    db::set_pr_state(&conn, pr_id, state)?;
+    db::set_pr_state(&conn, pr_id, state, "cli")?;
     println!("PR #{pr_id} is now {state}");
     Ok(())
 }
@@ -134,6 +147,76 @@ fn review_label(state: &str) -> &str {
         "changes_requested" => "CHANGES REQUESTED",
         _ => "COMMENTED",
     }
+}
+
+fn comment_loc(c: &db::Comment) -> String {
+    match (&c.path, c.line) {
+        (Some(p), Some(l)) => match c.start_line {
+            Some(s) if s != l => format!("{p}:{s}-{l}"),
+            _ => format!("{p}:{l}"),
+        },
+        (Some(p), None) => p.clone(),
+        _ => "the conversation".into(),
+    }
+}
+
+fn indent(text: &str, prefix: &str) {
+    for l in text.lines() {
+        println!("{prefix}{l}");
+    }
+}
+
+/// Prints events with a cursor for the next call, as text or as one JSON object.
+fn print_events(pr_id: i64, events: &[db::Event], cursor: i64, json: bool) -> Result<()> {
+    if json {
+        return print_json(&serde_json::json!({ "events": events, "cursor": cursor }));
+    }
+    if events.is_empty() {
+        println!("No new activity.");
+    }
+    for e in events {
+        let comment: Option<db::Comment> = serde_json::from_value(e.data["comment"].clone()).ok();
+        let what = comment.as_ref().map_or(String::new(), |c| format!(" #{} on {}", c.id, comment_loc(c)));
+        match e.kind.as_str() {
+            "comment_added" => {
+                let c = comment.as_ref().unwrap();
+                let kind = if c.parent_id.is_some() { "replied" } else { "commented" };
+                println!("[{}] {} {kind}{what}", e.id, e.actor);
+                indent(&c.body, "    ");
+            }
+            "comment_edited" => {
+                println!("[{}] {} edited comment{what}", e.id, e.actor);
+                indent(e.data["old_body"].as_str().unwrap_or(""), "    was: ");
+                indent(&comment.as_ref().unwrap().body, "    now: ");
+            }
+            "comment_deleted" => {
+                let replies: Vec<db::Comment> =
+                    serde_json::from_value(e.data["deleted_replies"].clone()).unwrap_or_default();
+                let suffix = match replies.len() {
+                    0 => String::new(),
+                    1 => " and its reply".into(),
+                    n => format!(" and its {n} replies"),
+                };
+                println!("[{}] {} deleted comment{what}{suffix}", e.id, e.actor);
+                indent(&comment.as_ref().unwrap().body, "    was: ");
+                for r in &replies {
+                    indent(&r.body, &format!("    reply #{} {}: ", r.id, r.author));
+                }
+            }
+            "comment_resolved" => println!("[{}] {} resolved thread{what}", e.id, e.actor),
+            "comment_unresolved" => println!("[{}] {} unresolved thread{what}", e.id, e.actor),
+            "review_submitted" => {
+                let state = e.data["review"]["state"].as_str().unwrap_or("");
+                println!("[{}] {} submitted a review: {}", e.id, e.actor, review_label(state));
+                indent(e.data["review"]["body"].as_str().unwrap_or(""), "    ");
+            }
+            "pr_closed" => println!("[{}] {} closed the PR", e.id, e.actor),
+            "pr_reopened" => println!("[{}] {} reopened the PR", e.id, e.actor),
+            other => println!("[{}] {} {other}", e.id, e.actor),
+        }
+    }
+    println!("\nNext: preflight events {pr_id} --since {cursor}");
+    Ok(())
 }
 
 /// Prints the latest review and the comment threads, as text or as one JSON object.
@@ -157,6 +240,8 @@ fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -
             "state": pr.state,
             "latest_review": latest_review,
             "threads": threads,
+            // Pass to `preflight events --since` to get only later changes.
+            "event_cursor": db::last_event_id(conn, pr_id)?,
         }));
     }
     if pr.state != "open" {
@@ -185,7 +270,8 @@ fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -
             (Some(p), None) => p.clone(),
             _ => "general".into(),
         };
-        println!("#{} [{state}] {loc} — {}", r.id, r.author);
+        let edited = if r.updated_at.is_some() { " (edited)" } else { "" };
+        println!("#{} [{state}] {loc} — {}{edited}", r.id, r.author);
         if let Some(t) = &r.line_text {
             for l in t.lines() {
                 println!("    > {l}");
@@ -195,7 +281,8 @@ fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -
             println!("    {l}");
         }
         for c in all.iter().filter(|c| c.parent_id == Some(r.id)) {
-            println!("    ↳ #{} {}: {}", c.id, c.author, c.body.replace('\n', "\n      "));
+            let edited = if c.updated_at.is_some() { " (edited)" } else { "" };
+            println!("    ↳ #{} {}{edited}: {}", c.id, c.author, c.body.replace('\n', "\n      "));
         }
         println!();
     }
@@ -227,14 +314,29 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Comments { pr_id, unresolved, json } => print_feedback(&db::open()?, pr_id, unresolved, json),
-        Cmd::Wait { pr_id, timeout, json } => {
+        Cmd::Events { pr_id, since, json } => {
+            let conn = db::open()?;
+            load_pr(&conn, pr_id)?;
+            let events = db::list_events(&conn, pr_id, since)?;
+            let cursor = events.last().map_or(since, |e| e.id);
+            print_events(pr_id, &events, cursor, json)
+        }
+        Cmd::Wait { pr_id, any, timeout, json } => {
             let conn = db::open()?;
             load_pr(&conn, pr_id)?;
             let seen = db::list_reviews(&conn, pr_id)?.last().map_or(0, |r| r.id);
+            let seen_event = db::last_event_id(&conn, pr_id)?;
             let deadline = timeout.map(|t| Instant::now() + Duration::from_secs(t));
-            eprintln!("Waiting for a review on {} …", pr_url(pr_id));
+            let what = if any { "reviewer activity" } else { "a review" };
+            eprintln!("Waiting for {what} on {} …", pr_url(pr_id));
             loop {
-                if db::list_reviews(&conn, pr_id)?.last().is_some_and(|r| r.id > seen) {
+                if any {
+                    let events = db::list_events(&conn, pr_id, seen_event)?;
+                    // Only the reviewer's actions in the web UI count; ignore the agent's own.
+                    if events.iter().any(|e| e.actor == "user") {
+                        return print_events(pr_id, &events, events.last().unwrap().id, json);
+                    }
+                } else if db::list_reviews(&conn, pr_id)?.last().is_some_and(|r| r.id > seen) {
                     return print_feedback(&conn, pr_id, true, json);
                 }
                 if deadline.is_some_and(|d| Instant::now() >= d) {
@@ -266,7 +368,7 @@ fn main() -> Result<()> {
         Cmd::Resolve { comment_id } => {
             let conn = db::open()?;
             db::get_comment(&conn, comment_id)?.context("comment not found")?;
-            db::set_resolved(&conn, comment_id, true)?;
+            db::set_resolved(&conn, comment_id, true, "agent")?;
             println!("Resolved #{comment_id}");
             Ok(())
         }

@@ -31,9 +31,26 @@ pub struct Review {
     pub created_at: i64,
 }
 
+/// One change to a PR, so agents can catch up on everything (including edits and deletions)
+/// with `preflight events --since <id>`.
+#[derive(Serialize, Clone)]
+pub struct Event {
+    pub id: i64,
+    pub pr_id: i64,
+    /// comment_added, comment_edited, comment_deleted, comment_resolved, comment_unresolved,
+    /// review_submitted, pr_closed or pr_reopened.
+    pub kind: String,
+    /// "user" for the web UI, the comment author for comments, "cli" for other CLI actions.
+    pub actor: String,
+    pub comment_id: Option<i64>,
+    /// Snapshot of what changed (the comment, its old body, deleted replies, the review...).
+    pub data: serde_json::Value,
+    pub created_at: i64,
+}
+
 pub const REVIEW_STATES: [&str; 3] = ["approved", "changes_requested", "commented"];
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Comment {
     pub id: i64,
     pub pr_id: i64,
@@ -49,6 +66,8 @@ pub struct Comment {
     pub line_text: Option<String>,
     pub resolved: bool,
     pub created_at: i64,
+    /// Set when the body was edited.
+    pub updated_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -101,6 +120,12 @@ pub fn open() -> Result<Connection> {
            path TEXT, line INTEGER, side TEXT, line_text TEXT,
            resolved INTEGER NOT NULL DEFAULT 0,
            created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS events (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           pr_id INTEGER NOT NULL REFERENCES prs(id),
+           kind TEXT NOT NULL, actor TEXT NOT NULL, comment_id INTEGER,
+           data TEXT NOT NULL DEFAULT '{}',
+           created_at INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS reviews (
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            pr_id INTEGER NOT NULL REFERENCES prs(id),
@@ -114,6 +139,7 @@ pub fn open() -> Result<Connection> {
         ("comments", "start_side", "ALTER TABLE comments ADD COLUMN start_side TEXT"),
         ("prs", "base_sha", "ALTER TABLE prs ADD COLUMN base_sha TEXT"),
         ("prs", "head_sha", "ALTER TABLE prs ADD COLUMN head_sha TEXT"),
+        ("comments", "updated_at", "ALTER TABLE comments ADD COLUMN updated_at INTEGER"),
     ] {
         let exists = conn
             .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
@@ -132,7 +158,7 @@ fn now() -> i64 {
 const PR_COLS: &str = "id, repo, base, head, title, description, state, base_sha, head_sha, created_at";
 const REVIEW_COLS: &str = "id, pr_id, author, state, body, created_at";
 const COMMENT_COLS: &str = "id, pr_id, parent_id, author, body, path, line, side, start_line, start_side, \
-                            line_text, resolved, created_at";
+                            line_text, resolved, created_at, updated_at";
 
 fn pr_row(r: &Row) -> rusqlite::Result<Pr> {
     Ok(Pr {
@@ -175,6 +201,7 @@ fn comment_row(r: &Row) -> rusqlite::Result<Comment> {
         line_text: r.get(10)?,
         resolved: r.get(11)?,
         created_at: r.get(12)?,
+        updated_at: r.get(13)?,
     })
 }
 
@@ -199,10 +226,45 @@ pub fn get_pr(c: &Connection, id: i64) -> Result<Option<Pr>> {
         .optional()?)
 }
 
-pub fn set_pr_state(c: &Connection, id: i64, state: &str) -> Result<()> {
+pub fn set_pr_state(c: &Connection, id: i64, state: &str, actor: &str) -> Result<()> {
     anyhow::ensure!(state == "open" || state == "closed", "state must be 'open' or 'closed'");
     c.execute("UPDATE prs SET state = ?1 WHERE id = ?2", params![state, id])?;
+    let kind = if state == "closed" { "pr_closed" } else { "pr_reopened" };
+    log_event(c, id, kind, actor, None, serde_json::json!({}))
+}
+
+fn log_event(c: &Connection, pr_id: i64, kind: &str, actor: &str, comment_id: Option<i64>, data: serde_json::Value) -> Result<()> {
+    c.execute(
+        "INSERT INTO events (pr_id, kind, actor, comment_id, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![pr_id, kind, actor, comment_id, data.to_string(), now()],
+    )?;
     Ok(())
+}
+
+pub fn list_events(c: &Connection, pr_id: i64, since: i64) -> Result<Vec<Event>> {
+    let mut st = c.prepare(
+        "SELECT id, pr_id, kind, actor, comment_id, data, created_at FROM events
+         WHERE pr_id = ?1 AND id > ?2 ORDER BY id",
+    )?;
+    let rows = st
+        .query_map(params![pr_id, since], |r| {
+            let data: String = r.get(5)?;
+            Ok(Event {
+                id: r.get(0)?,
+                pr_id: r.get(1)?,
+                kind: r.get(2)?,
+                actor: r.get(3)?,
+                comment_id: r.get(4)?,
+                data: serde_json::from_str(&data).unwrap_or_default(),
+                created_at: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+pub fn last_event_id(c: &Connection, pr_id: i64) -> Result<i64> {
+    Ok(c.query_row("SELECT COALESCE(MAX(id), 0) FROM events WHERE pr_id = ?1", [pr_id], |r| r.get(0))?)
 }
 
 pub fn list_prs(c: &Connection) -> Result<Vec<Pr>> {
@@ -246,12 +308,37 @@ pub fn add_comment(c: &Connection, pr_id: i64, n: &NewComment) -> Result<Comment
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![pr_id, n.parent_id, n.author, n.body, path, line, side, start_line, start_side, line_text, now()],
     )?;
-    get_comment(c, c.last_insert_rowid())?.context("comment vanished after insert")
+    let comment = get_comment(c, c.last_insert_rowid())?.context("comment vanished after insert")?;
+    log_event(c, pr_id, "comment_added", &comment.author, Some(comment.id), serde_json::json!({ "comment": comment }))?;
+    Ok(comment)
 }
 
-pub fn set_resolved(c: &Connection, id: i64, resolved: bool) -> Result<()> {
+pub fn edit_comment(c: &Connection, id: i64, body: &str) -> Result<()> {
+    let old = get_comment(c, id)?.context("comment not found")?;
+    c.execute("UPDATE comments SET body = ?1, updated_at = ?2 WHERE id = ?3", params![body, now(), id])?;
+    let comment = get_comment(c, id)?.context("comment vanished after update")?;
+    let data = serde_json::json!({ "old_body": old.body, "comment": comment });
+    log_event(c, old.pr_id, "comment_edited", &old.author, Some(id), data)
+}
+
+/// Deletes a comment; deleting a thread root deletes its replies too.
+pub fn delete_comment(c: &Connection, id: i64, actor: &str) -> Result<()> {
+    let comment = get_comment(c, id)?.context("comment not found")?;
+    let replies: Vec<_> = list_comments(c, comment.pr_id)?
+        .into_iter()
+        .filter(|r| r.parent_id == Some(id))
+        .collect();
+    c.execute("DELETE FROM comments WHERE parent_id = ?1", [id])?;
+    c.execute("DELETE FROM comments WHERE id = ?1", [id])?;
+    let data = serde_json::json!({ "comment": comment, "deleted_replies": replies });
+    log_event(c, comment.pr_id, "comment_deleted", actor, Some(id), data)
+}
+
+pub fn set_resolved(c: &Connection, id: i64, resolved: bool, actor: &str) -> Result<()> {
+    let comment = get_comment(c, id)?.context("comment not found")?;
     c.execute("UPDATE comments SET resolved = ?1 WHERE id = ?2", params![resolved, id])?;
-    Ok(())
+    let kind = if resolved { "comment_resolved" } else { "comment_unresolved" };
+    log_event(c, comment.pr_id, kind, actor, Some(id), serde_json::json!({ "comment": comment }))
 }
 
 pub fn add_review(c: &Connection, pr_id: i64, author: &str, state: &str, body: &str) -> Result<Review> {
@@ -261,7 +348,9 @@ pub fn add_review(c: &Connection, pr_id: i64, author: &str, state: &str, body: &
         params![pr_id, author, state, body, now()],
     )?;
     let id = c.last_insert_rowid();
-    Ok(c.query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?1"), [id], review_row)?)
+    let review = c.query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?1"), [id], review_row)?;
+    log_event(c, pr_id, "review_submitted", author, None, serde_json::json!({ "review": review }))?;
+    Ok(review)
 }
 
 pub fn list_reviews(c: &Connection, pr_id: i64) -> Result<Vec<Review>> {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, Comment, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
 import { DiffLine, FileDiff, filePath, parseDiff } from "./diff";
 import { highlightFile, highlightText } from "./highlight";
@@ -124,7 +124,15 @@ function PrPage({ id }: { id: number }) {
     await refreshComments();
     setReviewing(false);
   };
-  const actions = { addComment, resolve };
+  const editComment = async (commentId: number, body: string) => {
+    await api.editComment(commentId, body);
+    await refreshComments();
+  };
+  const deleteComment = async (commentId: number) => {
+    await api.deleteComment(commentId);
+    await refreshComments();
+  };
+  const actions = { addComment, resolve, editComment, deleteComment };
 
   if (err) return <div className="error">{err}</div>;
   if (!detail) return <div className="muted">Loading…</div>;
@@ -199,6 +207,8 @@ type LineSelection = { path: string; anchor: number; head: number; dragging: boo
 type Actions = {
   addComment: (c: NewComment) => Promise<void>;
   resolve: (id: number, resolved: boolean) => Promise<void>;
+  editComment: (id: number, body: string) => Promise<void>;
+  deleteComment: (id: number) => Promise<void>;
 };
 
 function lineKey(path: string, side: Side, line: number) {
@@ -827,17 +837,7 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
       {open && (
         <>
           {[root, ...replies].map((c) => (
-            <div key={c.id} className="comment">
-              <div className="comment-head">
-                <b className={c.author === "user" ? "" : "agent"}>{c.author}</b>{" "}
-                <span className="muted small">
-                  {timeAgo(c.created_at)} · #{c.id}
-                </span>
-              </div>
-              <div className="comment-body">
-                <Markdown text={c.body} />
-              </div>
-            </div>
+            <CommentView key={c.id} comment={c} isRoot={c.id === root.id} replies={replies.length} actions={actions} />
           ))}
           <div className="thread-footer">
             {replying ? (
@@ -866,14 +866,72 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
   );
 }
 
+function CommentView(props: { comment: Comment; isRoot: boolean; replies: number; actions: Actions }) {
+  const { comment: c, actions } = props;
+  const [editing, setEditing] = useState(false);
+  const remove = () => {
+    const what =
+      props.isRoot && props.replies > 0
+        ? `Delete this comment and its ${props.replies} ${props.replies === 1 ? "reply" : "replies"}?`
+        : "Delete this comment?";
+    if (window.confirm(what)) actions.deleteComment(c.id).catch((e) => alert(String(e)));
+  };
+  return (
+    <div className="comment">
+      <div className="comment-head">
+        <b className={c.author === "user" ? "" : "agent"}>{c.author}</b>{" "}
+        <span className="muted small">
+          {timeAgo(c.created_at)} · #{c.id}
+          {c.updated_at !== null && <span title={new Date(c.updated_at * 1000).toLocaleString()}> · edited</span>}
+        </span>
+        {/* The web UI is the "user"; agents' comments are read-only here, like others' comments on GitHub. */}
+        {c.author === "user" && !editing && (
+          <span className="comment-actions">
+            <button className="link-btn" onClick={() => setEditing(true)}>
+              Edit
+            </button>
+            <button className="link-btn danger" onClick={remove}>
+              Delete
+            </button>
+          </span>
+        )}
+      </div>
+      <div className="comment-body">
+        {editing ? (
+          <CommentForm
+            autoFocus
+            initial={c.body}
+            placeholder="Edit comment"
+            submitLabel="Update comment"
+            onCancel={() => setEditing(false)}
+            onSubmit={async (body) => {
+              await actions.editComment(c.id, body);
+              setEditing(false);
+            }}
+          />
+        ) : (
+          <Markdown text={c.body} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CommentForm(props: {
   placeholder: string;
   submitLabel: string;
   autoFocus?: boolean;
+  initial?: string;
   onSubmit: (body: string) => Promise<void>;
   onCancel?: () => void;
 }) {
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(props.initial ?? "");
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  // When editing, start with the caret after the existing text, like GitHub.
+  useEffect(() => {
+    const t = textarea.current;
+    if (t && props.initial) t.setSelectionRange(t.value.length, t.value.length);
+  }, [props.initial]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const submit = async () => {
@@ -892,6 +950,7 @@ function CommentForm(props: {
   return (
     <div className="comment-form">
       <textarea
+        ref={textarea}
         autoFocus={props.autoFocus}
         placeholder={props.placeholder}
         value={body}

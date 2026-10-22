@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query},
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use rust_embed::Embed;
@@ -146,7 +146,7 @@ async fn set_pr_state(Path(id): Path<i64>, Json(b): Json<SetState>) -> ApiResult
     let pr = load_pr(id)?;
     let conn = db::open()?;
     crate::snapshot_shas(&conn, &pr)?;
-    db::set_pr_state(&conn, id, &b.state)?;
+    db::set_pr_state(&conn, id, &b.state, "user")?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -166,6 +166,37 @@ async fn add_review(Path(id): Path<i64>, Json(b): Json<NewReview>) -> ApiResult 
     Ok(Json(json!(db::add_review(&db::open()?, id, "user", &b.state, &b.body)?)))
 }
 
+/// Loads a comment the reviewer may change: the web UI acts as "user", and agents' comments are theirs.
+fn own_comment(conn: &rusqlite::Connection, id: i64) -> Result<db::Comment, ApiError> {
+    let c = db::get_comment(conn, id)?.ok_or_else(|| not_found("comment"))?;
+    if c.author != "user" {
+        return Err(ApiError(StatusCode::FORBIDDEN, "you can only change your own comments".into()));
+    }
+    Ok(c)
+}
+
+#[derive(Deserialize)]
+struct EditComment {
+    body: String,
+}
+
+async fn edit_comment(Path(id): Path<i64>, Json(b): Json<EditComment>) -> ApiResult {
+    let conn = db::open()?;
+    own_comment(&conn, id)?;
+    if b.body.trim().is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "comment body is empty".into()));
+    }
+    db::edit_comment(&conn, id, &b.body)?;
+    Ok(Json(json!(db::get_comment(&conn, id)?)))
+}
+
+async fn delete_comment(Path(id): Path<i64>) -> ApiResult {
+    let conn = db::open()?;
+    own_comment(&conn, id)?;
+    db::delete_comment(&conn, id, "user")?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 struct Resolve {
     resolved: bool,
@@ -174,7 +205,7 @@ struct Resolve {
 async fn resolve_comment(Path(id): Path<i64>, Json(r): Json<Resolve>) -> ApiResult {
     let conn = db::open()?;
     db::get_comment(&conn, id)?.ok_or_else(|| not_found("comment"))?;
-    db::set_resolved(&conn, id, r.resolved)?;
+    db::set_resolved(&conn, id, r.resolved, "user")?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -207,6 +238,7 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .route("/api/prs/:id/comments", get(list_comments).post(add_comment))
         .route("/api/prs/:id/reviews", get(list_reviews).post(add_review))
         .route("/api/prs/:id/state", post(set_pr_state))
+        .route("/api/comments/:id", patch(edit_comment).delete(delete_comment))
         .route("/api/comments/:id/resolve", post(resolve_comment))
         .fallback(static_handler);
     // Bind to loopback only: this exposes your local repos' contents.
