@@ -1,5 +1,12 @@
 /* GitHub-ish look, light + dark. */
 :root {
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-comment: #6e7781;
+  --hl-number: #0550ae;
+  --hl-title: #8250df;
+  --hl-type: #953800;
+  --hl-tag: #116329;
   --bg: #ffffff;
   --bg-subtle: #f6f8fa;
   --fg: #1f2328;
@@ -30,6 +37,13 @@
     --del-num: rgba(248, 81, 73, 0.3);
     --hunk-bg: rgba(56, 139, 253, 0.1);
     --red: #f85149;
+    --hl-keyword: #ff7b72;
+    --hl-string: #a5d6ff;
+    --hl-comment: #8b949e;
+    --hl-number: #79c0ff;
+    --hl-title: #d2a8ff;
+    --hl-type: #ffa657;
+    --hl-tag: #7ee787;
     color-scheme: dark;
   }
 }
@@ -68,6 +82,7 @@ code, pre, .code, .num, .branch {
 .pr-heading { font-size: 32px; font-weight: 400; margin: 0 0 8px; }
 .pr-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 16px; }
 .state-badge { background: var(--green); color: #fff; border-radius: 2em; padding: 4px 12px; font-weight: 500; }
+.state-badge.closed { background: var(--red); }
 
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .tabs button {
@@ -79,7 +94,7 @@ code, pre, .code, .num, .branch {
 
 .conversation { max-width: 920px; }
 .timeline-item { margin-bottom: 16px; }
-.comment-body { padding: 12px 16px; white-space: pre-wrap; word-break: break-word; }
+.comment-body { padding: 12px 16px; word-break: break-word; }
 .commits { padding-left: 16px; border-left: 2px solid var(--border); }
 .commit { padding: 2px 0; }
 .thread-file { padding: 0 0 6px; }
@@ -164,3 +179,69 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .tree-mark { width: 12px; text-align: center; font-weight: 700; }
 .mod-text { color: #9a6700; }
 @media (max-width: 700px) { .file-tree { display: none; } }
+
+/* Syntax highlighting (highlight.js token classes), GitHub palette. */
+.hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword, .hljs-doctag, .hljs-template-tag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-meta .hljs-string, .hljs-char { color: var(--hl-string); }
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-number, .hljs-literal, .hljs-attr, .hljs-attribute, .hljs-variable, .hljs-built_in, .hljs-symbol, .hljs-selector-attr { color: var(--hl-number); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-title); }
+.hljs-type, .hljs-title.class_, .hljs-params, .hljs-meta { color: var(--hl-type); }
+.hljs-name, .hljs-tag, .hljs-selector-id, .hljs-selector-class, .hljs-bullet { color: var(--hl-tag); }
+.hljs-addition { color: var(--green); }
+.hljs-deletion { color: var(--red); }
+
+/* Markdown in descriptions, comments and reviews. */
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p, .markdown ul, .markdown ol, .markdown pre, .markdown blockquote, .markdown table { margin: 0 0 12px; }
+.markdown ul, .markdown ol { padding-left: 2em; }
+.markdown h1, .markdown h2, .markdown h3 { margin: 16px 0 8px; line-height: 1.25; }
+.markdown h1 { font-size: 1.6em; } .markdown h2 { font-size: 1.3em; } .markdown h3 { font-size: 1.1em; }
+.markdown code { background: var(--bg-subtle); padding: 0.2em 0.4em; border-radius: 6px; }
+.markdown pre { background: var(--bg-subtle); padding: 12px 16px; border-radius: 6px; overflow-x: auto; }
+.markdown pre code { background: none; padding: 0; }
+.markdown blockquote { color: var(--muted); border-left: 0.25em solid var(--border); padding: 0 1em; }
+.markdown table { border-collapse: collapse; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 4px 12px; }
+.markdown img { max-width: 100%; }
+
+/* PR list filter + state dots. */
+.list-filter { display: flex; gap: 12px; }
+.list-filter button { background: none; border: none; color: var(--muted); font: inherit; cursor: pointer; padding: 0; }
+.list-filter button.active { color: var(--fg); font-weight: 600; }
+.state-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--green); vertical-align: 1px; }
+.state-dot.closed { background: var(--red); }
+
+/* New-commits banner. */
+.banner {
+  display: flex; align-items: center; gap: 12px; padding: 8px 16px; margin-bottom: 16px;
+  background: var(--hunk-bg); border: 1px solid var(--border); border-radius: 6px;
+}
+.banner .btn { margin-left: auto; }
+
+/* Review changes button + panel. */
+.tabs { align-items: center; }
+.tabs-actions { margin-left: auto; position: relative; }
+.tabs-actions .btn { border-bottom: 1px solid rgba(31, 35, 40, 0.15); }
+.review-panel { position: absolute; right: 0; top: calc(100% + 4px); width: 420px; max-width: calc(100vw - 32px); z-index: 10; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2); }
+.review-panel-body { padding: 12px 16px; }
+.review-panel textarea {
+  width: 100%; min-height: 100px; padding: 8px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font: inherit; resize: vertical;
+}
+.review-option { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; cursor: pointer; }
+.review-option input { margin-top: 4px; }
+.review-event { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px 4px; }
+.review-icon {
+  width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg-subtle); border: 1px solid var(--border); font-size: 13px; font-weight: 700;
+}
+.review-event.approved .review-icon { background: var(--green); color: #fff; border-color: var(--green); }
+.review-event.changes .review-icon { background: var(--red); color: #fff; border-color: var(--red); }
+
+/* Viewed files. */
+.viewed-count { margin-left: 12px; }
+.viewed-toggle { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.tree-row.viewed .tree-file { color: var(--muted); }
+.tree-viewed { color: var(--green); font-size: 12px; }

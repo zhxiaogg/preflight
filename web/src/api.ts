@@ -5,6 +5,18 @@ export type Pr = {
   head: string;
   title: string;
   description: string;
+  state: "open" | "closed";
+  created_at: number;
+};
+
+export type ReviewState = "approved" | "changes_requested" | "commented";
+
+export type Review = {
+  id: number;
+  pr_id: number;
+  author: string;
+  state: ReviewState;
+  body: string;
   created_at: number;
 };
 
@@ -57,6 +69,11 @@ export const api = {
   listComments: (id: number) => req<Comment[]>(`/api/prs/${id}/comments`),
   addComment: (id: number, c: NewComment) =>
     req<Comment>(`/api/prs/${id}/comments`, { method: "POST", body: JSON.stringify(c) }),
+  listReviews: (id: number) => req<Review[]>(`/api/prs/${id}/reviews`),
+  submitReview: (id: number, state: ReviewState, body: string) =>
+    req<Review>(`/api/prs/${id}/reviews`, { method: "POST", body: JSON.stringify({ state, body }) }),
+  setState: (id: number, state: Pr["state"]) =>
+    req(`/api/prs/${id}/state`, { method: "POST", body: JSON.stringify({ state }) }),
   resolve: (commentId: number, resolved: boolean) =>
     req(`/api/comments/${commentId}/resolve`, { method: "POST", body: JSON.stringify({ resolved }) }),
 };

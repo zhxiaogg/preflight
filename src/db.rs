@@ -12,8 +12,23 @@ pub struct Pr {
     pub head: String,
     pub title: String,
     pub description: String,
+    /// "open" or "closed".
+    pub state: String,
     pub created_at: i64,
 }
+
+#[derive(Serialize, Clone)]
+pub struct Review {
+    pub id: i64,
+    pub pr_id: i64,
+    pub author: String,
+    /// "approved", "changes_requested" or "commented".
+    pub state: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
+pub const REVIEW_STATES: [&str; 3] = ["approved", "changes_requested", "commented"];
 
 #[derive(Serialize, Clone)]
 pub struct Comment {
@@ -77,8 +92,20 @@ pub fn open() -> Result<Connection> {
            author TEXT NOT NULL, body TEXT NOT NULL,
            path TEXT, line INTEGER, side TEXT, line_text TEXT,
            resolved INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS reviews (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           pr_id INTEGER NOT NULL REFERENCES prs(id),
+           author TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
            created_at INTEGER NOT NULL);",
     )?;
+    // Columns added after the first release.
+    let has_state: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('prs') WHERE name = 'state'")?
+        .exists([])?;
+    if !has_state {
+        conn.execute_batch("ALTER TABLE prs ADD COLUMN state TEXT NOT NULL DEFAULT 'open'")?;
+    }
     Ok(conn)
 }
 
@@ -86,7 +113,8 @@ fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-const PR_COLS: &str = "id, repo, base, head, title, description, created_at";
+const PR_COLS: &str = "id, repo, base, head, title, description, state, created_at";
+const REVIEW_COLS: &str = "id, pr_id, author, state, body, created_at";
 const COMMENT_COLS: &str =
     "id, pr_id, parent_id, author, body, path, line, side, line_text, resolved, created_at";
 
@@ -98,7 +126,19 @@ fn pr_row(r: &Row) -> rusqlite::Result<Pr> {
         head: r.get(3)?,
         title: r.get(4)?,
         description: r.get(5)?,
-        created_at: r.get(6)?,
+        state: r.get(6)?,
+        created_at: r.get(7)?,
+    })
+}
+
+fn review_row(r: &Row) -> rusqlite::Result<Review> {
+    Ok(Review {
+        id: r.get(0)?,
+        pr_id: r.get(1)?,
+        author: r.get(2)?,
+        state: r.get(3)?,
+        body: r.get(4)?,
+        created_at: r.get(5)?,
     })
 }
 
@@ -129,6 +169,12 @@ pub fn create_pr(c: &Connection, repo: &str, base: &str, head: &str, title: &str
 pub fn get_pr(c: &Connection, id: i64) -> Result<Option<Pr>> {
     Ok(c.query_row(&format!("SELECT {PR_COLS} FROM prs WHERE id = ?1"), [id], pr_row)
         .optional()?)
+}
+
+pub fn set_pr_state(c: &Connection, id: i64, state: &str) -> Result<()> {
+    anyhow::ensure!(state == "open" || state == "closed", "state must be 'open' or 'closed'");
+    c.execute("UPDATE prs SET state = ?1 WHERE id = ?2", params![state, id])?;
+    Ok(())
 }
 
 pub fn list_prs(c: &Connection) -> Result<Vec<Pr>> {
@@ -170,4 +216,20 @@ pub fn add_comment(c: &Connection, pr_id: i64, n: &NewComment) -> Result<Comment
 pub fn set_resolved(c: &Connection, id: i64, resolved: bool) -> Result<()> {
     c.execute("UPDATE comments SET resolved = ?1 WHERE id = ?2", params![resolved, id])?;
     Ok(())
+}
+
+pub fn add_review(c: &Connection, pr_id: i64, author: &str, state: &str, body: &str) -> Result<Review> {
+    anyhow::ensure!(REVIEW_STATES.contains(&state), "state must be one of {REVIEW_STATES:?}");
+    c.execute(
+        "INSERT INTO reviews (pr_id, author, state, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![pr_id, author, state, body, now()],
+    )?;
+    let id = c.last_insert_rowid();
+    Ok(c.query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?1"), [id], review_row)?)
+}
+
+pub fn list_reviews(c: &Connection, pr_id: i64) -> Result<Vec<Review>> {
+    let mut st = c.prepare(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE pr_id = ?1 ORDER BY id"))?;
+    let rows = st.query_map([pr_id], review_row)?.collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
 }

@@ -82,6 +82,33 @@ async fn add_comment(Path(id): Path<i64>, Json(n): Json<db::NewComment>) -> ApiR
 }
 
 #[derive(Deserialize)]
+struct SetState {
+    state: String,
+}
+
+async fn set_pr_state(Path(id): Path<i64>, Json(b): Json<SetState>) -> ApiResult {
+    load_pr(id)?;
+    db::set_pr_state(&db::open()?, id, &b.state)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn list_reviews(Path(id): Path<i64>) -> ApiResult {
+    Ok(Json(json!(db::list_reviews(&db::open()?, id)?)))
+}
+
+#[derive(Deserialize)]
+struct NewReview {
+    state: String,
+    #[serde(default)]
+    body: String,
+}
+
+async fn add_review(Path(id): Path<i64>, Json(b): Json<NewReview>) -> ApiResult {
+    load_pr(id)?;
+    Ok(Json(json!(db::add_review(&db::open()?, id, "user", &b.state, &b.body)?)))
+}
+
+#[derive(Deserialize)]
 struct Resolve {
     resolved: bool,
 }
@@ -119,6 +146,8 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
         .route("/api/prs/:id", get(get_pr))
         .route("/api/prs/:id/diff", get(get_diff))
         .route("/api/prs/:id/comments", get(list_comments).post(add_comment))
+        .route("/api/prs/:id/reviews", get(list_reviews).post(add_review))
+        .route("/api/prs/:id/state", post(set_pr_state))
         .route("/api/comments/:id/resolve", post(resolve_comment))
         .fallback(static_handler);
     // Bind to loopback only: this exposes your local repos' contents.

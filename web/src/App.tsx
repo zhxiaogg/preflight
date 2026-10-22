@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, Comment, NewComment, Pr, PrDetail, Side } from "./api";
+import { api, Comment, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
 import { DiffLine, FileDiff, filePath, parseDiff } from "./diff";
+import { highlightFile } from "./highlight";
+import { Markdown } from "./Markdown";
 
 const POLL_MS = 4000;
 
@@ -25,24 +27,35 @@ export function App() {
 }
 
 function PrList() {
-  const [prs, setPrs] = useState<Pr[] | null>(null);
+  const [all, setAll] = useState<Pr[] | null>(null);
   const [err, setErr] = useState("");
+  const [show, setShow] = useState<Pr["state"]>("open");
   useEffect(() => {
-    api.listPrs().then(setPrs, (e) => setErr(String(e)));
+    api.listPrs().then(setAll, (e) => setErr(String(e)));
   }, []);
   if (err) return <div className="error">{err}</div>;
-  if (!prs) return <div className="muted">Loading…</div>;
+  if (!all) return <div className="muted">Loading…</div>;
+  const prs = all.filter((p) => p.state === show);
+  const count = (st: Pr["state"]) => all.filter((p) => p.state === st).length;
   return (
     <div className="box">
-      <div className="box-header">{prs.length} preflight PRs</div>
-      {prs.length === 0 && (
+      <div className="box-header list-filter">
+        {(["open", "closed"] as const).map((st) => (
+          <button key={st} className={show === st ? "active" : ""} onClick={() => setShow(st)}>
+            {count(st)} {st === "open" ? "Open" : "Closed"}
+          </button>
+        ))}
+      </div>
+      {all.length === 0 && (
         <div className="box-row muted">
           No PRs yet. Create one with <code>preflight create --repo . --base main --head my-branch --title "…"</code>
         </div>
       )}
       {prs.map((p) => (
         <a key={p.id} className="box-row pr-row" href={`/pr/${p.id}`}>
-          <div className="pr-title">{p.title}</div>
+          <div className="pr-title">
+            <span className={`state-dot ${p.state}`} /> {p.title}
+          </div>
           <div className="muted small">
             #{p.id} · {p.repo} · <span className="branch">{p.base}</span> ← <span className="branch">{p.head}</span> ·
             opened {timeAgo(p.created_at)}
@@ -59,24 +72,40 @@ function PrPage({ id }: { id: number }) {
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [files, setFiles] = useState<FileDiff[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [latestHead, setLatestHead] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
   const [err, setErr] = useState("");
   const [tab, setTab] = useState<Tab>(window.location.hash === "#files" ? "files" : "conversation");
 
-  const refreshComments = useCallback(() => api.listComments(id).then(setComments), [id]);
+  const refreshComments = useCallback(
+    () => Promise.all([api.listComments(id).then(setComments), api.listReviews(id).then(setReviews)]),
+    [id],
+  );
+
+  // Diff is computed live from the branches, so reloading picks up new agent commits.
+  const load = useCallback(
+    () =>
+      Promise.all([api.getPr(id), api.getDiff(id), refreshComments()]).then(
+        ([d, diff]) => {
+          setDetail(d);
+          setLatestHead(d.head_sha);
+          setFiles(treeOrder(parseDiff(diff.diff)));
+        },
+        (e) => setErr(String(e)),
+      ),
+    [id, refreshComments],
+  );
 
   useEffect(() => {
-    // Diff is computed live from the branches, so a reload picks up new agent commits.
-    Promise.all([api.getPr(id), api.getDiff(id), refreshComments()]).then(
-      ([d, diff]) => {
-        setDetail(d);
-        setFiles(parseDiff(diff.diff));
-      },
-      (e) => setErr(String(e)),
-    );
-    // Poll so agent replies show up without a reload.
-    const t = setInterval(() => refreshComments().catch(() => {}), POLL_MS);
+    load();
+    // Poll so agent replies and new commits show up without a reload.
+    const t = setInterval(() => {
+      refreshComments().catch(() => {});
+      api.getPr(id).then((d) => setLatestHead(d.head_sha), () => {});
+    }, POLL_MS);
     return () => clearInterval(t);
-  }, [id, refreshComments]);
+  }, [id, load, refreshComments]);
 
   const addComment = async (c: NewComment) => {
     await api.addComment(id, c);
@@ -85,6 +114,15 @@ function PrPage({ id }: { id: number }) {
   const resolve = async (commentId: number, resolved: boolean) => {
     await api.resolve(commentId, resolved);
     await refreshComments();
+  };
+  const setState = async (state: Pr["state"]) => {
+    await api.setState(id, state);
+    await load();
+  };
+  const submitReview = async (state: ReviewState, body: string) => {
+    await api.submitReview(id, state, body);
+    await refreshComments();
+    setReviewing(false);
   };
   const actions = { addComment, resolve };
 
@@ -103,12 +141,20 @@ function PrPage({ id }: { id: number }) {
         {pr.title} <span className="muted">#{pr.id}</span>
       </h1>
       <div className="pr-meta">
-        <span className="state-badge">Open</span>
+        <span className={`state-badge ${pr.state}`}>{pr.state === "open" ? "Open" : "Closed"}</span>
         <span className="muted">
           wants to merge {detail.commits.length} commit{detail.commits.length === 1 ? "" : "s"} into{" "}
           <span className="branch">{pr.base}</span> from <span className="branch">{pr.head}</span> · {pr.repo}
         </span>
       </div>
+      {latestHead && latestHead !== detail.head_sha && (
+        <div className="banner">
+          New commits were pushed to <span className="branch">{pr.head}</span>.
+          <button className="btn" onClick={load}>
+            Refresh
+          </button>
+        </div>
+      )}
       <nav className="tabs">
         <button className={tab === "conversation" ? "active" : ""} onClick={() => switchTab("conversation")}>
           Conversation <span className="count">{roots.length}</span>
@@ -116,17 +162,25 @@ function PrPage({ id }: { id: number }) {
         <button className={tab === "files" ? "active" : ""} onClick={() => switchTab("files")}>
           Files changed <span className="count">{files.length}</span>
         </button>
+        <div className="tabs-actions">
+          <button className="btn primary" onClick={() => setReviewing(!reviewing)}>
+            Review changes ▾
+          </button>
+          {reviewing && <ReviewPanel onSubmit={submitReview} onCancel={() => setReviewing(false)} />}
+        </div>
       </nav>
       {tab === "conversation" ? (
         <Conversation
           detail={detail}
           files={files}
           comments={comments}
+          reviews={reviews}
           actions={actions}
           onOpenFiles={() => switchTab("files")}
+          onSetState={setState}
         />
       ) : (
-        <FilesChanged files={files} comments={comments} actions={actions} />
+        <FilesChanged prId={id} files={files} comments={comments} actions={actions} />
       )}
     </>
   );
@@ -163,13 +217,20 @@ function Conversation(props: {
   detail: PrDetail;
   files: FileDiff[];
   comments: Comment[];
+  reviews: Review[];
   actions: Actions;
   onOpenFiles: () => void;
+  onSetState: (state: Pr["state"]) => Promise<void>;
 }) {
   const { detail, files, comments, actions } = props;
   // Inline threads whose line no longer exists in the current diff are "outdated".
   const texts = useMemo(() => lineTexts(files), [files]);
   const roots = comments.filter((c) => c.parent_id === null);
+  type Item = { at: number; thread?: Comment; review?: Review };
+  const timeline: Item[] = [
+    ...roots.map((c) => ({ at: c.created_at, thread: c })),
+    ...props.reviews.map((r) => ({ at: r.created_at, review: r })),
+  ].sort((a, b) => a.at - b.at);
 
   return (
     <div className="conversation">
@@ -177,7 +238,9 @@ function Conversation(props: {
         <div className="box-header">
           <b>agent</b> <span className="muted">opened this PR {timeAgo(detail.pr.created_at)}</span>
         </div>
-        <div className="comment-body">{detail.pr.description || <span className="muted">No description provided.</span>}</div>
+        <div className="comment-body">
+          {detail.pr.description ? <Markdown text={detail.pr.description} /> : <span className="muted">No description provided.</span>}
+        </div>
       </div>
       {detail.commits.length > 0 && (
         <div className="timeline-item commits">
@@ -188,7 +251,9 @@ function Conversation(props: {
           ))}
         </div>
       )}
-      {roots.map((r) => {
+      {timeline.map((item) => {
+        if (item.review) return <ReviewItem key={`r${item.review.id}`} review={item.review} />;
+        const r = item.thread!;
         const outdated = isOutdated(r, texts);
         return (
           <div key={r.id} className="timeline-item">
@@ -214,14 +279,39 @@ function Conversation(props: {
       })}
       <div className="timeline-item">
         <CommentForm placeholder="Leave a comment" submitLabel="Comment" onSubmit={(body) => actions.addComment({ body })} />
+        <div className="form-actions">
+          {detail.pr.state === "open" ? (
+            <button className="btn" onClick={() => props.onSetState("closed")}>
+              Close pull request
+            </button>
+          ) : (
+            <button className="btn" onClick={() => props.onSetState("open")}>
+              Reopen pull request
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function FilesChanged(props: { files: FileDiff[]; comments: Comment[]; actions: Actions }) {
+function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Comment[]; actions: Actions }) {
   const { files, comments, actions } = props;
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [viewed, setViewedState] = useState<Record<string, string>>(() => loadViewed(props.prId));
+  const highlighted = useMemo(() => files.map(highlightFile), [files]);
+  const fingerprints = useMemo(() => files.map(fingerprint), [files]);
+  // Like GitHub, a file stops counting as viewed once its diff changes.
+  const isViewed = (i: number) => viewed[filePath(files[i])] === fingerprints[i];
+  const toggleViewed = (i: number) => {
+    const path = filePath(files[i]);
+    const next = { ...viewed };
+    if (isViewed(i)) delete next[path];
+    else next[path] = fingerprints[i];
+    setViewedState(next);
+    saveViewed(props.prId, next);
+    setCollapsed({ ...collapsed, [path]: !isViewed(i) });
+  };
   const [composer, setComposer] = useState<string | null>(null);
 
   const threadsByLine = useMemo(() => {
@@ -254,14 +344,23 @@ function FilesChanged(props: { files: FileDiff[]; comments: Comment[]; actions: 
 
   return (
     <div className="files-layout">
-      <FileTree files={files} active={active} openThreads={openThreads} onSelect={jumpTo} />
+      <FileTree
+        files={files}
+        active={active}
+        openThreads={openThreads}
+        viewed={new Set(files.filter((_, i) => isViewed(i)).map(filePath))}
+        onSelect={jumpTo}
+      />
       <div className="files-main">
         <div className="diffstat muted small">
           {files.length} files changed <span className="add-text">+{adds}</span> <span className="del-text">−{dels}</span>
+          <span className="viewed-count">
+            {files.filter((_, i) => isViewed(i)).length} / {files.length} viewed
+          </span>
         </div>
-        {files.map((f) => {
+        {files.map((f, fi) => {
           const path = filePath(f);
-          const isCollapsed = collapsed[path];
+          const isCollapsed = collapsed[path] ?? isViewed(fi);
           return (
             <div key={path} id={fileAnchor(path)} className="file box">
               <div className="file-header" onClick={() => setCollapsed({ ...collapsed, [path]: !isCollapsed })}>
@@ -271,6 +370,9 @@ function FilesChanged(props: { files: FileDiff[]; comments: Comment[]; actions: 
                   {f.status === "renamed" ? `${f.oldPath} → ${f.newPath}` : path}
                 </span>
                 {f.status !== "modified" && <span className="label">{f.status}</span>}
+                <label className="viewed-toggle" onClick={(e) => e.stopPropagation()}>
+                  <input type="checkbox" checked={isViewed(fi)} onChange={() => toggleViewed(fi)} /> Viewed
+                </label>
               </div>
               {!isCollapsed &&
                 (f.binary ? (
@@ -299,6 +401,7 @@ function FilesChanged(props: { files: FileDiff[]; comments: Comment[]; actions: 
                           <DiffRow
                             key={i}
                             line={l}
+                            html={highlighted[fi]?.[i]}
                             onAdd={() => setComposer(k)}
                             threads={threads}
                             comments={comments}
@@ -325,6 +428,30 @@ function FilesChanged(props: { files: FileDiff[]; comments: Comment[]; actions: 
 
 function fileAnchor(path: string) {
   return `file-${path}`;
+}
+
+/** Cheap hash of a file's diff, used to reset "Viewed" when the file changes. */
+function fingerprint(f: FileDiff) {
+  let h = 0;
+  for (const l of f.lines) for (let i = 0; i < l.text.length; i++) h = (h * 31 + l.text.charCodeAt(i)) | 0;
+  return `${f.lines.length}:${h}`;
+}
+
+// "Viewed" marks are a per-browser convenience, so localStorage is enough.
+function loadViewed(prId: number): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(`preflight:viewed:${prId}`) ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveViewed(prId: number, v: Record<string, string>) {
+  try {
+    localStorage.setItem(`preflight:viewed:${prId}`, JSON.stringify(v));
+  } catch {
+    // Storage unavailable (private mode): marks just won't persist.
+  }
 }
 
 type TreeNode = { name: string; path: string; dirs: TreeNode[]; files: FileDiff[] };
@@ -354,6 +481,15 @@ function buildTree(files: FileDiff[]): TreeNode {
   return compress(root);
 }
 
+/** Files in the order the tree shows them (folders first, then files, by name), so diffs match the tree. */
+function treeOrder(files: FileDiff[]): FileDiff[] {
+  const walk = (n: TreeNode): FileDiff[] => [
+    ...n.dirs.flatMap(walk),
+    ...n.files.slice().sort((a, b) => filePath(a).localeCompare(filePath(b))),
+  ];
+  return walk(buildTree(files));
+}
+
 const STATUS_MARK: Record<FileDiff["status"], [string, string]> = {
   added: ["+", "add-text"],
   deleted: ["−", "del-text"],
@@ -365,6 +501,7 @@ function FileTree(props: {
   files: FileDiff[];
   active: string | null;
   openThreads: Map<string, number>;
+  viewed: Set<string>;
   onSelect: (path: string) => void;
 }) {
   const [filter, setFilter] = useState("");
@@ -399,13 +536,14 @@ function FileTree(props: {
         return (
           <div
             key={`f:${path}`}
-            className={`tree-row ${props.active === path ? "active" : ""}`}
+            className={`tree-row ${props.active === path ? "active" : ""} ${props.viewed.has(path) ? "viewed" : ""}`}
             style={{ paddingLeft: 8 + depth * 14 + 16 }}
             title={path}
             onClick={() => props.onSelect(path)}
           >
             <span className="tree-file">{path.split("/").pop()}</span>
             {open ? <span className="count">{open}</span> : null}
+            {props.viewed.has(path) && <span className="tree-viewed">✓</span>}
             <span className={`tree-mark ${cls}`}>{mark}</span>
           </div>
         );
@@ -422,6 +560,8 @@ function FileTree(props: {
 
 function DiffRow(props: {
   line: DiffLine;
+  /** Syntax-highlighted line (escaped by highlight.js), if the language is known. */
+  html?: string;
   threads: Comment[];
   comments: Comment[];
   actions: Actions;
@@ -442,7 +582,7 @@ function DiffRow(props: {
             +
           </button>
           <span className="sign">{sign}</span>
-          {l.text}
+          {props.html !== undefined ? <span dangerouslySetInnerHTML={{ __html: props.html }} /> : l.text}
         </td>
       </tr>
       {(threads.length > 0 || composing) && (
@@ -494,7 +634,9 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
                   {timeAgo(c.created_at)} · #{c.id}
                 </span>
               </div>
-              <div className="comment-body">{c.body}</div>
+              <div className="comment-body">
+                <Markdown text={c.body} />
+              </div>
             </div>
           ))}
           <div className="thread-footer">
@@ -569,6 +711,82 @@ function CommentForm(props: {
         <button className="btn primary" disabled={busy || !body.trim()} onClick={submit}>
           {props.submitLabel}
         </button>
+      </div>
+    </div>
+  );
+}
+
+const REVIEW_TEXT: Record<ReviewState, [string, string]> = {
+  approved: ["approved these changes", "approved"],
+  changes_requested: ["requested changes", "changes"],
+  commented: ["reviewed", "commented"],
+};
+
+function ReviewItem({ review }: { review: Review }) {
+  const [text, cls] = REVIEW_TEXT[review.state];
+  return (
+    <div className="timeline-item">
+      <div className={`review-event ${cls}`}>
+        <span className="review-icon">{review.state === "approved" ? "✓" : review.state === "changes_requested" ? "±" : "💬"}</span>
+        <b>{review.author}</b> <span className="muted">{text} {timeAgo(review.created_at)}</span>
+      </div>
+      {review.body && (
+        <div className="box">
+          <div className="comment-body">
+            <Markdown text={review.body} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReviewPanel(props: { onSubmit: (state: ReviewState, body: string) => Promise<void>; onCancel: () => void }) {
+  const [state, setState] = useState<ReviewState>("commented");
+  const [body, setBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await props.onSubmit(state, body);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const options: [ReviewState, string, string][] = [
+    ["commented", "Comment", "Submit general feedback without explicit approval."],
+    ["approved", "Approve", "Give your approval to these changes."],
+    ["changes_requested", "Request changes", "Submit feedback the agent must address."],
+  ];
+  return (
+    <div className="review-panel box">
+      <div className="box-header">
+        <b>Finish your review</b>
+      </div>
+      <div className="review-panel-body">
+        <textarea autoFocus placeholder="Leave a summary (optional)" value={body} onChange={(e) => setBody(e.target.value)} />
+        {options.map(([value, label, hint]) => (
+          <label key={value} className="review-option">
+            <input type="radio" name="review-state" checked={state === value} onChange={() => setState(value)} />
+            <span>
+              <b>{label}</b>
+              <div className="muted small">{hint}</div>
+            </span>
+          </label>
+        ))}
+        {err && <div className="error">{err}</div>}
+        <div className="form-actions">
+          <button className="btn" onClick={props.onCancel}>
+            Cancel
+          </button>
+          <button className="btn primary" disabled={busy || (state !== "approved" && !body.trim())} onClick={submit}>
+            Submit review
+          </button>
+        </div>
       </div>
     </div>
   );
