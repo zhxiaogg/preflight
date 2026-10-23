@@ -22,17 +22,40 @@ pub fn diff(repo: &str, base: &str, head: &str) -> Result<String> {
     git(repo, &["diff", "--no-color", "--no-ext-diff", "-M", &format!("{base}...{head}")])
 }
 
+/// Git's well-known empty tree, used as the "parent" of a root commit.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Combined changes of the commits `from` through `to` (inclusive), like picking a commit range
+/// on GitHub; `from` == `to` gives a single commit's diff.
+pub fn diff_range(repo: &str, from: &str, to: &str) -> Result<String> {
+    let parent = rev_parse(repo, &format!("{from}^")).unwrap_or_else(|_| EMPTY_TREE.to_string());
+    git(repo, &["diff", "--no-color", "--no-ext-diff", "-M", &parent, to])
+}
+
 /// Contents of `path` at `rev` (used to expand unchanged context around hunks).
 pub fn show(repo: &str, rev: &str, path: &str) -> Result<String> {
     git(repo, &["show", &format!("{rev}:{path}")])
 }
 
-/// Commits on `head` not on `base`, newest first, as (sha, subject).
-pub fn commits(repo: &str, base: &str, head: &str) -> Result<Vec<(String, String)>> {
-    let out = git(repo, &["log", "--format=%h%x09%s", &format!("{base}..{head}")])?;
+pub struct Commit {
+    /// Full object id.
+    pub oid: String,
+    pub short: String,
+    pub subject: String,
+}
+
+/// Commits on `head` not on `base`, newest first.
+pub fn commits(repo: &str, base: &str, head: &str) -> Result<Vec<Commit>> {
+    let out = git(repo, &["log", "--format=%H%x09%h%x09%s", &format!("{base}..{head}")])?;
     Ok(out
         .lines()
-        .filter_map(|l| l.split_once('\t'))
-        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, '\t');
+            Some(Commit {
+                oid: parts.next()?.to_string(),
+                short: parts.next()?.to_string(),
+                subject: parts.next().unwrap_or("").to_string(),
+            })
+        })
         .collect())
 }

@@ -27,10 +27,14 @@ export type PrDetail = {
   /** The branch was deleted; the PR is shown at the last commit seen. */
   base_missing: boolean;
   head_missing: boolean;
-  commits: { sha: string; subject: string }[];
+  /** Newest first. `oid` is the full id, `sha` the short one. */
+  commits: { oid: string; sha: string; subject: string }[];
 };
 
 export type Side = "old" | "new";
+
+/** A range of the PR's commits by full id, `from` being the oldest; equal for a single commit. */
+export type CommitRange = { from: string; to: string };
 
 export type Comment = {
   id: number;
@@ -74,9 +78,13 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   listPrs: () => req<Pr[]>("/api/prs"),
   getPr: (id: number) => req<PrDetail>(`/api/prs/${id}`),
-  getDiff: (id: number) => req<{ diff: string }>(`/api/prs/${id}/diff`),
-  getFile: (id: number, path: string) =>
-    req<{ content: string }>(`/api/prs/${id}/file?path=${encodeURIComponent(path)}`),
+  /** Whole-PR diff, or the combined diff of commits `from`..`to` (inclusive). */
+  getDiff: (id: number, range?: CommitRange) =>
+    req<{ diff: string }>(`/api/prs/${id}/diff${range ? `?from=${range.from}&to=${range.to}` : ""}`),
+  getFile: (id: number, path: string, rev?: string) =>
+    req<{ content: string }>(
+      `/api/prs/${id}/file?path=${encodeURIComponent(path)}${rev ? `&rev=${encodeURIComponent(rev)}` : ""}`,
+    ),
   listComments: (id: number) => req<Comment[]>(`/api/prs/${id}/comments`),
   addComment: (id: number, c: NewComment) =>
     req<Comment>(`/api/prs/${id}/comments`, { method: "POST", body: JSON.stringify(c) }),

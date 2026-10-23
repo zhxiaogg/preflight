@@ -29,6 +29,8 @@ preflight create --repo /path/to/repo --base main --head my-feature --title "Add
 Review in the browser like on GitHub: syntax-highlighted diffs with a file tree, `+` on a line to comment (drag the `+` or shift-click line numbers to comment on several lines),
 expandable context around hunks (↑ expand up, ↓ expand down), markdown in descriptions and comments, editing/deleting your own comments, "Viewed" checkboxes, reply/resolve threads, and **Review changes**
 (Comment / Approve / Request changes). A banner appears when the agent pushes new commits.
+Click a commit to see just its changes, or check two commits (in the Conversation tab or the
+**Changes from** menu on the Files tab) to see all changes between them; those views are read-only.
 
 Agent reads feedback and responds:
 
@@ -68,7 +70,7 @@ Don't resolve threads yourself unless asked; the reviewer resolves them.
 |---|---|---|
 | GET/POST | `/api/prs` | list / create (`{repo, base, head, title, description}`) |
 | GET | `/api/prs/:id` | PR + base/head sha + commits |
-| GET | `/api/prs/:id/diff` | raw unified diff |
+| GET | `/api/prs/:id/diff` | raw unified diff (`?from=<oid>&to=<oid>` for a range of the PR's commits) |
 | GET/POST | `/api/prs/:id/comments` | list / add (`{body, parent_id?, path?, line?, side?, line_text?, author?}`) |
 | GET/POST | `/api/prs/:id/reviews` | list / submit (`{state: approved\|changes_requested\|commented, body}`) |
 | POST | `/api/prs/:id/state` | `{state: open\|closed}` |

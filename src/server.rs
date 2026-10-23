@@ -98,7 +98,7 @@ async fn get_pr(Path(id): Path<i64>) -> ApiResult {
     let refs = resolve(&pr)?;
     let commits: Vec<Value> = git::commits(&pr.repo, &refs.base, &refs.head)?
         .into_iter()
-        .map(|(sha, subject)| json!({ "sha": sha, "subject": subject }))
+        .map(|c| json!({ "oid": c.oid, "sha": c.short, "subject": c.subject }))
         .collect();
     Ok(Json(json!({
         "pr": pr,
@@ -110,22 +110,56 @@ async fn get_pr(Path(id): Path<i64>) -> ApiResult {
     })))
 }
 
-async fn get_diff(Path(id): Path<i64>) -> ApiResult {
+/// Position of `oid` among the PR's commits (newest first); only the PR's own commits may be
+/// viewed through these endpoints.
+fn commit_index(commits: &[git::Commit], oid: &str) -> Result<usize, ApiError> {
+    commits
+        .iter()
+        .position(|c| c.oid == oid)
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("{oid} is not a commit of this PR")))
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    /// Oldest commit of the range to show (inclusive). Omit both for the whole PR.
+    from: Option<String>,
+    /// Newest commit of the range (inclusive); defaults to `from`.
+    to: Option<String>,
+}
+
+async fn get_diff(Path(id): Path<i64>, Query(q): Query<DiffQuery>) -> ApiResult {
     let pr = load_pr(id)?;
     let refs = resolve(&pr)?;
-    Ok(Json(json!({ "diff": git::diff(&pr.repo, &refs.base, &refs.head)? })))
+    let Some(from) = q.from.or(q.to.clone()) else {
+        return Ok(Json(json!({ "diff": git::diff(&pr.repo, &refs.base, &refs.head)? })));
+    };
+    let to = q.to.unwrap_or_else(|| from.clone());
+    let commits = git::commits(&pr.repo, &refs.base, &refs.head)?;
+    let (fi, ti) = (commit_index(&commits, &from)?, commit_index(&commits, &to)?);
+    // Accept the two commits in either order; the older one has the larger index.
+    let (old, new) = if fi >= ti { (&from, &to) } else { (&to, &from) };
+    Ok(Json(json!({ "diff": git::diff_range(&pr.repo, old, new)? })))
 }
 
 #[derive(Deserialize)]
 struct FileQuery {
     path: String,
+    /// A commit of the PR to read the file at; defaults to the PR's head.
+    rev: Option<String>,
 }
 
-/// Full file at the PR's head, for expanding hidden context lines in the diff.
+/// Full file at the PR's head (or one of its commits), for expanding hidden context lines.
 async fn get_file(Path(id): Path<i64>, Query(q): Query<FileQuery>) -> ApiResult {
     let pr = load_pr(id)?;
     let refs = resolve(&pr)?;
-    Ok(Json(json!({ "content": git::show(&pr.repo, &refs.head, &q.path)? })))
+    let rev = match q.rev {
+        Some(rev) => {
+            commit_index(&git::commits(&pr.repo, &refs.base, &refs.head)?, &rev)?;
+            rev
+        }
+        None => refs.head,
+    };
+    Ok(Json(json!({ "content": git::show(&pr.repo, &rev, &q.path)? })))
 }
 
 async fn list_comments(Path(id): Path<i64>) -> ApiResult {

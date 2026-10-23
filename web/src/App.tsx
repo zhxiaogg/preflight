@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, Comment, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
+import { api, Comment, CommitRange, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
 import { DiffLine, FileDiff, filePath, parseDiff } from "./diff";
 import { highlightFile, highlightText } from "./highlight";
 import { Markdown } from "./Markdown";
@@ -78,6 +78,39 @@ function PrList() {
 
 type Tab = "conversation" | "files";
 
+// Each view has its own URL, like GitHub, so the browser's back/forward buttons step through them:
+// /pr/<id>, /pr/<id>/files, /pr/<id>/files/<oid> and /pr/<id>/files/<from>..<to>.
+function parseRoute(): { tab: Tab; range: CommitRange | null } {
+  const m = window.location.pathname.match(/^\/pr\/\d+\/files(?:\/([0-9a-f]+)(?:\.\.([0-9a-f]+))?)?\/?$/);
+  if (!m) return { tab: "conversation", range: null };
+  return { tab: "files", range: m[1] ? { from: m[1], to: m[2] ?? m[1] } : null };
+}
+
+function routeUrl(prId: number, tab: Tab, range: CommitRange | null) {
+  if (tab === "conversation") return `/pr/${prId}`;
+  if (!range) return `/pr/${prId}/files`;
+  return `/pr/${prId}/files/${range.from === range.to ? range.from : `${range.from}..${range.to}`}`;
+}
+
+/** Commits picked by up to two checked endpoints; everything between them is included. */
+function rangeFromEndpoints(commits: PrDetail["commits"], endpoints: string[]): CommitRange | null {
+  // `commits` is newest first, so the oldest selected commit has the highest index.
+  const idx = endpoints.map((oid) => commits.findIndex((c) => c.oid === oid)).filter((i) => i >= 0);
+  if (idx.length === 0) return null;
+  return { from: commits[Math.max(...idx)].oid, to: commits[Math.min(...idx)].oid };
+}
+
+function endpointsOf(range: CommitRange | null): string[] {
+  if (!range) return [];
+  return range.from === range.to ? [range.from] : [range.from, range.to];
+}
+
+/** Index range (into newest-first `commits`) covered by a selection, or [-1, -1]. */
+function coveredBy(commits: PrDetail["commits"], range: CommitRange | null): [number, number] {
+  if (!range) return [-1, -1];
+  return [commits.findIndex((c) => c.oid === range.to), commits.findIndex((c) => c.oid === range.from)];
+}
+
 function PrPage({ id }: { id: number }) {
   const [detail, setDetail] = useState<PrDetail | null>(null);
   const [files, setFiles] = useState<FileDiff[]>([]);
@@ -86,7 +119,21 @@ function PrPage({ id }: { id: number }) {
   const [latestHead, setLatestHead] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [err, setErr] = useState("");
-  const [tab, setTab] = useState<Tab>(window.location.hash === "#files" ? "files" : "conversation");
+  const [tab, setTab] = useState<Tab>(() => parseRoute().tab);
+  // Commits selected on the Files tab; null shows the whole PR.
+  const [range, setRange] = useState<CommitRange | null>(() => parseRoute().range);
+  useEffect(() => {
+    const onPop = () => {
+      const r = parseRoute();
+      setTab(r.tab);
+      if (r.tab === "files") setRange(r.range);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const [rangeFiles, setRangeFiles] = useState<FileDiff[] | null>(null);
+  const [rangeLoading, setRangeLoading] = useState(false);
+  const [rangeErr, setRangeErr] = useState("");
 
   const refreshComments = useCallback(
     () => Promise.all([api.listComments(id).then(setComments), api.listReviews(id).then(setReviews)]),
@@ -106,6 +153,26 @@ function PrPage({ id }: { id: number }) {
       ),
     [id, refreshComments],
   );
+
+  // Diff of the selected commits, refetched when the selection or the head changes.
+  const headSha = detail?.head_sha;
+  // The previous selection's diff stays on screen while the next one loads, so the picker stays open.
+  useEffect(() => {
+    setRangeErr("");
+    if (!range || !headSha) return;
+    let current = true;
+    setRangeLoading(true);
+    api
+      .getDiff(id, range)
+      .then(
+        (d) => current && setRangeFiles(treeOrder(parseDiff(d.diff))),
+        (e) => current && setRangeErr(String(e)),
+      )
+      .finally(() => current && setRangeLoading(false));
+    return () => {
+      current = false;
+    };
+  }, [id, range, headSha]);
 
   useEffect(() => {
     load();
@@ -148,9 +215,11 @@ function PrPage({ id }: { id: number }) {
   if (!detail) return <div className="muted">Loading…</div>;
   const { pr } = detail;
   const roots = comments.filter((c) => c.parent_id === null);
-  const switchTab = (t: Tab) => {
+  const switchTab = (t: Tab, r: CommitRange | null = range) => {
     setTab(t);
-    history.replaceState(null, "", t === "files" ? "#files" : "#");
+    if (t === "files") setRange(r);
+    const url = routeUrl(id, t, t === "files" ? r : null);
+    if (url !== window.location.pathname) history.pushState(null, "", url);
   };
 
   return (
@@ -201,11 +270,42 @@ function PrPage({ id }: { id: number }) {
           comments={comments}
           reviews={reviews}
           actions={actions}
-          onOpenFiles={() => switchTab("files")}
+          onOpenFiles={() => switchTab("files", null)}
+          onOpenCommits={(r) => switchTab("files", r)}
           onSetState={setState}
         />
+      ) : range ? (
+        rangeErr ? (
+          <div className="banner">
+            <span className="error">{rangeErr}</span>
+            <button className="btn" onClick={() => switchTab("files", null)}>
+              Show all changes
+            </button>
+          </div>
+        ) : !rangeFiles ? (
+          <div className="muted">Loading…</div>
+        ) : (
+          <FilesChanged
+            prId={id}
+            files={rangeFiles}
+            loading={rangeLoading}
+            comments={comments}
+            actions={actions}
+            commits={detail.commits}
+            range={range}
+            onRange={(r) => switchTab("files", r)}
+          />
+        )
       ) : (
-        <FilesChanged prId={id} files={files} comments={comments} actions={actions} />
+        <FilesChanged
+          prId={id}
+          files={files}
+          comments={comments}
+          actions={actions}
+          commits={detail.commits}
+          range={null}
+          onRange={(r) => switchTab("files", r)}
+        />
       )}
     </>
   );
@@ -263,6 +363,7 @@ function Conversation(props: {
   reviews: Review[];
   actions: Actions;
   onOpenFiles: () => void;
+  onOpenCommits: (r: CommitRange) => void;
   onSetState: (state: Pr["state"]) => Promise<void>;
 }) {
   const { detail, files, comments, actions } = props;
@@ -286,13 +387,7 @@ function Conversation(props: {
         </div>
       </div>
       {detail.commits.length > 0 && (
-        <div className="timeline-item commits">
-          {detail.commits.map((c) => (
-            <div key={c.sha} className="commit">
-              <code>{c.sha}</code> {c.subject}
-            </div>
-          ))}
-        </div>
+        <CommitList prId={detail.pr.id} commits={detail.commits} onOpen={props.onOpenCommits} />
       )}
       {timeline.map((item) => {
         if (item.review) return <ReviewItem key={`r${item.review.id}`} review={item.review} />;
@@ -303,7 +398,7 @@ function Conversation(props: {
             {r.path && (
               <div className="thread-file">
                 <a
-                  href="#files"
+                  href={routeUrl(detail.pr.id, "files", null)}
                   onClick={(e) => {
                     e.preventDefault();
                     props.onOpenFiles();
@@ -338,8 +433,20 @@ function Conversation(props: {
   );
 }
 
-function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Comment[]; actions: Actions }) {
-  const { files, comments, actions } = props;
+function FilesChanged(props: {
+  prId: number;
+  files: FileDiff[];
+  comments: Comment[];
+  actions: Actions;
+  commits: PrDetail["commits"];
+  /** Selected commits; when set, the view is read-only (comments and "Viewed" use the whole PR). */
+  range: CommitRange | null;
+  loading?: boolean;
+  onRange: (r: CommitRange | null) => void;
+}) {
+  const { files, actions, range } = props;
+  // Line numbers in a partial diff don't match the PR's, so threads are only shown on the whole PR.
+  const comments = range ? [] : props.comments;
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [viewed, setViewedState] = useState<Record<string, string>>(() => loadViewed(props.prId));
   const highlighted = useMemo(() => files.map(highlightFile), [files]);
@@ -379,7 +486,14 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
 
   const adds = files.reduce((n, f) => n + f.additions, 0);
   const dels = files.reduce((n, f) => n + f.deletions, 0);
-  if (files.length === 0) return <div className="box box-row muted">No changes between these branches.</div>;
+  const picker = <CommitPicker prId={props.prId} commits={props.commits} range={range} onRange={props.onRange} />;
+  if (files.length === 0)
+    return (
+      <div>
+        <div className="diffstat muted small">{picker}</div>
+        <div className="box box-row muted">{range ? "No changes in the selected commits." : "No changes between these branches."}</div>
+      </div>
+    );
 
   const openThreads = new Map<string, number>();
   for (const ts of threadsByLine.values())
@@ -397,19 +511,32 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
         files={files}
         active={active}
         openThreads={openThreads}
-        viewed={new Set(files.filter((_, i) => isViewed(i)).map(filePath))}
+        viewed={range ? new Set() : new Set(files.filter((_, i) => isViewed(i)).map(filePath))}
         onSelect={jumpTo}
       />
       <div className="files-main">
         <div className="diffstat muted small">
+          {picker}
           {files.length} files changed <span className="add-text">+{adds}</span> <span className="del-text">−{dels}</span>
-          <span className="viewed-count">
-            {files.filter((_, i) => isViewed(i)).length} / {files.length} viewed
-          </span>
+          {props.loading && <span>Loading…</span>}
+          {!range && (
+            <span className="viewed-count">
+              {files.filter((_, i) => isViewed(i)).length} / {files.length} viewed
+            </span>
+          )}
         </div>
+        {range && (
+          <div className="banner">
+            Showing changes from {range.from === range.to ? "one commit" : "the selected commits"}. Comments and
+            “Viewed” are only available on the whole pull request.
+            <button className="btn" onClick={() => props.onRange(null)}>
+              Show all changes
+            </button>
+          </div>
+        )}
         {files.map((f, fi) => {
           const path = filePath(f);
-          const isCollapsed = collapsed[path] ?? isViewed(fi);
+          const isCollapsed = collapsed[path] ?? (!range && isViewed(fi));
           return (
             <div key={path} id={fileAnchor(path)} className="file box">
               <div className="file-header" onClick={() => setCollapsed({ ...collapsed, [path]: !isCollapsed })}>
@@ -419,9 +546,11 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
                   {f.status === "renamed" ? `${f.oldPath} → ${f.newPath}` : path}
                 </span>
                 {f.status !== "modified" && <span className="label">{f.status}</span>}
-                <label className="viewed-toggle" onClick={(e) => e.stopPropagation()}>
-                  <input type="checkbox" checked={isViewed(fi)} onChange={() => toggleViewed(fi)} /> Viewed
-                </label>
+                {!range && (
+                  <label className="viewed-toggle" onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked={isViewed(fi)} onChange={() => toggleViewed(fi)} /> Viewed
+                  </label>
+                )}
               </div>
               {!isCollapsed &&
                 (f.binary ? (
@@ -436,6 +565,7 @@ function FilesChanged(props: { prId: number; files: FileDiff[]; comments: Commen
                     actions={actions}
                     sel={sel?.path === path ? sel : null}
                     setSel={setSel}
+                    rev={range?.to}
                   />
                 ))}
             </div>
@@ -590,6 +720,8 @@ function FileDiffTable(props: {
   actions: Actions;
   sel: LineSelection | null;
   setSel: (s: LineSelection | null) => void;
+  /** Commit being viewed, for a partial (commit range) diff; read-only, and context comes from it. */
+  rev?: string;
 }) {
   const { file: f, threadsByLine, comments, actions, sel, setSel } = props;
   const path = filePath(f);
@@ -618,7 +750,7 @@ function FileDiffTable(props: {
   const ensureContent = async () => {
     if (content) return;
     try {
-      const { content: text } = await api.getFile(props.prId, path);
+      const { content: text } = await api.getFile(props.prId, path, props.rev);
       const lines = text.split("\n");
       if (lines[lines.length - 1] === "") lines.pop();
       setContent(lines);
@@ -691,9 +823,9 @@ function FileDiffTable(props: {
         line={l}
         html={props.html?.[i]}
         selected={i >= lo && i <= hi}
-        onAddMouseDown={(shift) => select(i, shift, !shift)}
-        onNumClick={(shift) => select(i, shift, false)}
-        onMouseEnter={() => sel?.dragging && extendable(i) && setSel({ ...sel, head: i })}
+        onAddMouseDown={props.rev ? undefined : (shift) => select(i, shift, !shift)}
+        onNumClick={props.rev ? undefined : (shift) => select(i, shift, false)}
+        onMouseEnter={props.rev ? undefined : () => sel?.dragging && extendable(i) && setSel({ ...sel, head: i })}
         threads={threadsByLine.get(k) ?? []}
         comments={comments}
         actions={actions}
@@ -1058,5 +1190,143 @@ function ReviewPanel(props: { onSubmit: (state: ReviewState, body: string) => Pr
         </div>
       </div>
     </div>
+  );
+}
+
+/** One commit row: a checkbox to pick it as an endpoint, and a link to view just that commit. */
+function CommitRow(props: {
+  prId: number;
+  commit: PrDetail["commits"][number];
+  checked: boolean;
+  /** Between two checked commits, so part of the compared changes. */
+  included: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+  onOpen: () => void;
+}) {
+  const { commit: c } = props;
+  return (
+    <div className={`commit-row ${props.included ? "included" : ""}`}>
+      <input
+        type="checkbox"
+        checked={props.checked}
+        disabled={props.disabled}
+        title={props.disabled ? "Uncheck a commit first: you can compare two commits" : "Select to compare"}
+        onChange={props.onToggle}
+      />
+      <a
+        href={routeUrl(props.prId, "files", { from: c.oid, to: c.oid })}
+        title="Show the changes in this commit"
+        onClick={(e) => {
+          e.preventDefault();
+          props.onOpen();
+        }}
+      >
+        <code>{c.sha}</code> {c.subject}
+      </a>
+    </div>
+  );
+}
+
+/** Toggles a commit as one of (at most two) endpoints; null when two are already checked. */
+function toggleEndpoint(endpoints: string[], oid: string): string[] | null {
+  if (endpoints.includes(oid)) return endpoints.filter((e) => e !== oid);
+  return endpoints.length < 2 ? [...endpoints, oid] : null;
+}
+
+/** The Conversation tab's commit list: click a commit to view it, or check two to compare. */
+function CommitList(props: { prId: number; commits: PrDetail["commits"]; onOpen: (r: CommitRange) => void }) {
+  const [endpoints, setEndpoints] = useState<string[]>([]);
+  const selection = rangeFromEndpoints(props.commits, endpoints);
+  const [lo, hi] = coveredBy(props.commits, selection);
+  const count = selection ? hi - lo + 1 : 0;
+  return (
+    <div className="timeline-item commits">
+      {props.commits.map((c, i) => (
+        <CommitRow
+          key={c.oid}
+          prId={props.prId}
+          commit={c}
+          checked={endpoints.includes(c.oid)}
+          included={i >= lo && i <= hi}
+          disabled={endpoints.length === 2 && !endpoints.includes(c.oid)}
+          onToggle={() => setEndpoints(toggleEndpoint(endpoints, c.oid) ?? endpoints)}
+          onOpen={() => props.onOpen({ from: c.oid, to: c.oid })}
+        />
+      ))}
+      {props.commits.length > 1 && (
+        <div className="commit-compare muted small">
+          {selection ? (
+            <button className="btn" onClick={() => props.onOpen(selection)}>
+              View changes in {count} commit{count === 1 ? "" : "s"}
+            </button>
+          ) : (
+            "Check two commits to compare all changes between them."
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "Changes from" dropdown on the Files tab: click a commit to view it, or check two to compare. */
+function CommitPicker(props: {
+  prId: number;
+  commits: PrDetail["commits"];
+  range: CommitRange | null;
+  onRange: (r: CommitRange | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const endpoints = endpointsOf(props.range);
+  const [lo, hi] = coveredBy(props.commits, props.range);
+  const label = !props.range
+    ? "All commits"
+    : lo === hi
+      ? props.commits[lo]?.sha ?? "1 commit"
+      : `${hi - lo + 1} commits (${props.commits[hi]?.sha}..${props.commits[lo]?.sha})`;
+
+  return (
+    <span className="commit-picker">
+      <button className="btn" onClick={() => setOpen(!open)}>
+        Changes from: <b>{label}</b> ▾
+      </button>
+      {open && (
+        <div className="commit-menu box">
+          <div className="commit-menu-hint muted small">
+            Click a commit to view it, or check two commits to view all changes between them.
+          </div>
+          <button
+            className={`commit-option ${props.range ? "" : "selected"}`}
+            onClick={() => {
+              props.onRange(null);
+              setOpen(false);
+            }}
+          >
+            <b>Show all changes</b>
+            <span className="muted small">
+              {props.commits.length} commit{props.commits.length === 1 ? "" : "s"}
+            </span>
+          </button>
+          {props.commits.map((c, i) => (
+            <CommitRow
+              key={c.oid}
+              prId={props.prId}
+              commit={c}
+              checked={endpoints.includes(c.oid)}
+              included={i >= lo && i <= hi}
+              disabled={endpoints.length === 2 && !endpoints.includes(c.oid)}
+              onToggle={() => {
+                const next = toggleEndpoint(endpoints, c.oid);
+                if (next) props.onRange(rangeFromEndpoints(props.commits, next)); // menu stays open
+              }}
+              onOpen={() => {
+                props.onRange({ from: c.oid, to: c.oid });
+                setOpen(false);
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
