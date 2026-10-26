@@ -88,6 +88,18 @@ enum Cmd {
     },
     /// Mark a comment thread resolved
     Resolve { comment_id: i64 },
+    /// Change a PR's title, description or base branch
+    Edit {
+        pr_id: i64,
+        #[arg(long)]
+        title: Option<String>,
+        /// New description (markdown); "-" reads it from stdin
+        #[arg(long)]
+        description: Option<String>,
+        /// New target branch
+        #[arg(long)]
+        base: Option<String>,
+    },
     /// Close a PR (e.g. after it was pushed and merged remotely)
     Close { pr_id: i64 },
     /// Reopen a closed PR
@@ -130,6 +142,26 @@ pub fn snapshot_shas(conn: &Connection, pr: &db::Pr) -> Result<()> {
         db::set_shas(conn, pr.id, &base, &head)?;
     }
     Ok(())
+}
+
+/// Validates and applies an edit of a PR's title, description or base, from the CLI or the web UI.
+pub fn edit_pr(
+    conn: &Connection,
+    pr: &db::Pr,
+    title: Option<&str>,
+    description: Option<&str>,
+    base: Option<&str>,
+    actor: &str,
+) -> Result<db::Pr> {
+    let title = title.map(str::trim);
+    anyhow::ensure!(title != Some(""), "title can't be empty");
+    if let Some(base) = base.filter(|b| *b != pr.base) {
+        // A closed PR is frozen at its final commits; changing its base would make that misleading.
+        anyhow::ensure!(pr.state == "open", "reopen the PR before changing its base");
+        anyhow::ensure!(base != pr.head, "base can't be the same as the head branch");
+        git::rev_parse(&pr.repo, base).with_context(|| format!("unknown base '{base}'"))?;
+    }
+    db::update_pr(conn, pr.id, title, description, base, actor)
 }
 
 fn set_state(pr_id: i64, state: &str) -> Result<()> {
@@ -209,6 +241,18 @@ fn print_events(pr_id: i64, events: &[db::Event], cursor: i64, json: bool) -> Re
                 let state = e.data["review"]["state"].as_str().unwrap_or("");
                 println!("[{}] {} submitted a review: {}", e.id, e.actor, review_label(state));
                 indent(e.data["review"]["body"].as_str().unwrap_or(""), "    ");
+            }
+            "pr_edited" => {
+                println!("[{}] {} edited the PR", e.id, e.actor);
+                for field in ["title", "base"] {
+                    if let Some(ch) = e.data.get(field) {
+                        println!("    {field}: {} → {}", ch["old"].as_str().unwrap_or(""), ch["new"].as_str().unwrap_or(""));
+                    }
+                }
+                if let Some(ch) = e.data.get("description") {
+                    println!("    description changed to:");
+                    indent(ch["new"].as_str().unwrap_or(""), "      ");
+                }
             }
             "pr_closed" => println!("[{}] {} closed the PR", e.id, e.actor),
             "pr_reopened" => println!("[{}] {} reopened the PR", e.id, e.actor),
@@ -370,6 +414,21 @@ fn main() -> Result<()> {
             db::get_comment(&conn, comment_id)?.context("comment not found")?;
             db::set_resolved(&conn, comment_id, true, "agent")?;
             println!("Resolved #{comment_id}");
+            Ok(())
+        }
+        Cmd::Edit { pr_id, title, description, base } => {
+            let conn = db::open()?;
+            let pr = load_pr(&conn, pr_id)?;
+            let description = match description.as_deref() {
+                Some("-") => Some(std::io::read_to_string(std::io::stdin())?),
+                _ => description,
+            };
+            anyhow::ensure!(
+                title.is_some() || description.is_some() || base.is_some(),
+                "nothing to change: pass --title, --description or --base"
+            );
+            let pr = edit_pr(&conn, &pr, title.as_deref(), description.as_deref(), base.as_deref(), "cli")?;
+            println!("Updated PR #{}: {}  ({} <- {})\n{}", pr.id, pr.title, pr.base, pr.head, pr_url(pr.id));
             Ok(())
         }
         Cmd::Close { pr_id } => set_state(pr_id, "closed"),

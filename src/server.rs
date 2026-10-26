@@ -176,6 +176,25 @@ struct SetState {
     state: String,
 }
 
+#[derive(Deserialize)]
+struct EditPr {
+    title: Option<String>,
+    description: Option<String>,
+    base: Option<String>,
+}
+
+async fn edit_pr(Path(id): Path<i64>, Json(b): Json<EditPr>) -> ApiResult {
+    let pr = load_pr(id)?;
+    let conn = db::open()?;
+    let pr = crate::edit_pr(&conn, &pr, b.title.as_deref(), b.description.as_deref(), b.base.as_deref(), "user")?;
+    Ok(Json(json!(pr)))
+}
+
+async fn list_branches(Path(id): Path<i64>) -> ApiResult {
+    let pr = load_pr(id)?;
+    Ok(Json(json!({ "branches": git::branches(&pr.repo)? })))
+}
+
 async fn set_pr_state(Path(id): Path<i64>, Json(b): Json<SetState>) -> ApiResult {
     let pr = load_pr(id)?;
     let conn = db::open()?;
@@ -266,7 +285,8 @@ async fn static_handler(uri: Uri) -> Response {
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/prs", get(list_prs).post(create_pr))
-        .route("/api/prs/:id", get(get_pr))
+        .route("/api/prs/:id", get(get_pr).patch(edit_pr))
+        .route("/api/prs/:id/branches", get(list_branches))
         .route("/api/prs/:id/diff", get(get_diff))
         .route("/api/prs/:id/file", get(get_file))
         .route("/api/prs/:id/comments", get(list_comments).post(add_comment))

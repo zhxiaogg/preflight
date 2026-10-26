@@ -300,3 +300,17 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .commit-option:hover { background: var(--bg-subtle); }
 .commit-option.selected { background: var(--hunk-bg); }
 .commit-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Editing the PR title / base / description. */
+.pr-title-row { display: flex; align-items: flex-start; gap: 16px; }
+.pr-title-row .pr-heading { flex: 1; min-width: 0; }
+.pr-title-row .btn { margin-top: 8px; }
+.pr-title-edit { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.title-input {
+  flex: 1; min-width: 240px; font: inherit; font-size: 20px; padding: 5px 12px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg);
+}
+.base-select select { font: inherit; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.pr-title-edit .error { flex-basis: 100%; }
+.box-header { display: flex; align-items: baseline; gap: 4px; }
+.header-action { margin-left: auto; }

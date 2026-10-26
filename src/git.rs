@@ -37,6 +37,16 @@ pub fn show(repo: &str, rev: &str, path: &str) -> Result<String> {
     git(repo, &["show", &format!("{rev}:{path}")])
 }
 
+/// Local and remote-tracking branches, for picking a PR's base.
+pub fn branches(repo: &str) -> Result<Vec<String>> {
+    let out = git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"])?;
+    Ok(out
+        .lines()
+        .filter(|b| !b.ends_with("/HEAD") && !b.is_empty())
+        .map(String::from)
+        .collect())
+}
+
 pub struct Commit {
     /// Full object id.
     pub oid: String,

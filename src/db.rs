@@ -226,6 +226,33 @@ pub fn get_pr(c: &Connection, id: i64) -> Result<Option<Pr>> {
         .optional()?)
 }
 
+/// Updates the given fields and logs a `pr_edited` event with old/new values of those that changed.
+pub fn update_pr(
+    c: &Connection,
+    id: i64,
+    title: Option<&str>,
+    description: Option<&str>,
+    base: Option<&str>,
+    actor: &str,
+) -> Result<Pr> {
+    let old = get_pr(c, id)?.context("pr not found")?;
+    let mut changes = serde_json::Map::new();
+    for (field, old_value, new_value) in [
+        ("title", &old.title, title),
+        ("description", &old.description, description),
+        ("base", &old.base, base),
+    ] {
+        let Some(new_value) = new_value.filter(|v| *v != old_value.as_str()) else { continue };
+        // `field` comes from the fixed list above, so it is safe to splice into the SQL.
+        c.execute(&format!("UPDATE prs SET {field} = ?1 WHERE id = ?2"), params![new_value, id])?;
+        changes.insert(field.into(), serde_json::json!({ "old": old_value, "new": new_value }));
+    }
+    if !changes.is_empty() {
+        log_event(c, id, "pr_edited", actor, None, serde_json::Value::Object(changes))?;
+    }
+    get_pr(c, id)?.context("pr vanished after update")
+}
+
 pub fn set_pr_state(c: &Connection, id: i64, state: &str, actor: &str) -> Result<()> {
     anyhow::ensure!(state == "open" || state == "closed", "state must be 'open' or 'closed'");
     c.execute("UPDATE prs SET state = ?1 WHERE id = ?2", params![state, id])?;

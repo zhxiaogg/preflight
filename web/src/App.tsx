@@ -210,6 +210,10 @@ function PrPage({ id }: { id: number }) {
     await refreshComments();
   };
   const actions = { addComment, resolve, editComment, deleteComment };
+  const editPr = async (changes: Parameters<typeof api.editPr>[1]) => {
+    await api.editPr(id, changes);
+    await load();
+  };
 
   if (err) return <div className="error">{err}</div>;
   if (!detail) return <div className="muted">Loading…</div>;
@@ -224,9 +228,7 @@ function PrPage({ id }: { id: number }) {
 
   return (
     <>
-      <h1 className="pr-heading">
-        {pr.title} <span className="muted">#{pr.id}</span>
-      </h1>
+      <PrTitle pr={pr} onSave={editPr} />
       <div className="pr-meta">
         <span className={`state-badge ${pr.state}`}>{pr.state === "open" ? "Open" : "Closed"}</span>
         <span className="muted">
@@ -273,6 +275,7 @@ function PrPage({ id }: { id: number }) {
           onOpenFiles={() => switchTab("files", null)}
           onOpenCommits={(r) => switchTab("files", r)}
           onSetState={setState}
+          onEditDescription={(description) => editPr({ description })}
         />
       ) : range ? (
         rangeErr ? (
@@ -365,7 +368,9 @@ function Conversation(props: {
   onOpenFiles: () => void;
   onOpenCommits: (r: CommitRange) => void;
   onSetState: (state: Pr["state"]) => Promise<void>;
+  onEditDescription: (description: string) => Promise<void>;
 }) {
+  const [editingDescription, setEditingDescription] = useState(false);
   const { detail, files, comments, actions } = props;
   // Inline threads whose line no longer exists in the current diff are "outdated".
   const texts = useMemo(() => lineTexts(files), [files]);
@@ -381,9 +386,31 @@ function Conversation(props: {
       <div className="timeline-item box">
         <div className="box-header">
           <b>agent</b> <span className="muted">opened this PR {timeAgo(detail.pr.created_at)}</span>
+          {!editingDescription && (
+            <button className="link-btn header-action" onClick={() => setEditingDescription(true)}>
+              Edit
+            </button>
+          )}
         </div>
         <div className="comment-body">
-          {detail.pr.description ? <Markdown text={detail.pr.description} /> : <span className="muted">No description provided.</span>}
+          {editingDescription ? (
+            <CommentForm
+              autoFocus
+              allowEmpty
+              initial={detail.pr.description}
+              placeholder="Describe the changes (markdown)"
+              submitLabel="Update description"
+              onCancel={() => setEditingDescription(false)}
+              onSubmit={async (body) => {
+                await props.onEditDescription(body);
+                setEditingDescription(false);
+              }}
+            />
+          ) : detail.pr.description ? (
+            <Markdown text={detail.pr.description} />
+          ) : (
+            <span className="muted">No description provided.</span>
+          )}
         </div>
       </div>
       {detail.commits.length > 0 && (
@@ -1064,6 +1091,8 @@ function CommentForm(props: {
   submitLabel: string;
   autoFocus?: boolean;
   initial?: string;
+  /** Allow submitting an empty text (e.g. clearing a PR description). */
+  allowEmpty?: boolean;
   onSubmit: (body: string) => Promise<void>;
   onCancel?: () => void;
 }) {
@@ -1077,7 +1106,7 @@ function CommentForm(props: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const submit = async () => {
-    if (!body.trim()) return;
+    if (!body.trim() && !props.allowEmpty) return;
     setBusy(true);
     setErr("");
     try {
@@ -1109,7 +1138,7 @@ function CommentForm(props: {
             Cancel
           </button>
         )}
-        <button className="btn primary" disabled={busy || !body.trim()} onClick={submit}>
+        <button className="btn primary" disabled={busy || (!body.trim() && !props.allowEmpty)} onClick={submit}>
           {props.submitLabel}
         </button>
       </div>
@@ -1328,5 +1357,86 @@ function CommitPicker(props: {
         </div>
       )}
     </span>
+  );
+}
+
+/** PR title with an Edit button, like GitHub's; editing also lets you change the base branch. */
+function PrTitle(props: { pr: Pr; onSave: (changes: Parameters<typeof api.editPr>[1]) => Promise<void> }) {
+  const { pr } = props;
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(pr.title);
+  const [base, setBase] = useState(pr.base);
+  const [branches, setBranches] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const start = () => {
+    setTitle(pr.title);
+    setBase(pr.base);
+    setErr("");
+    setEditing(true);
+    api.listBranches(pr.id).then(
+      (b) => setBranches(b.branches.filter((x) => x !== pr.head)),
+      () => setBranches([]),
+    );
+  };
+  const save = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await props.onSave({ title, ...(base !== pr.base && { base }) });
+      setEditing(false);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!editing)
+    return (
+      <div className="pr-title-row">
+        <h1 className="pr-heading">
+          {pr.title} <span className="muted">#{pr.id}</span>
+        </h1>
+        <button className="btn" onClick={start}>
+          Edit
+        </button>
+      </div>
+    );
+
+  // The current base stays selectable even if it's not a branch anymore (e.g. deleted).
+  const options = branches && (branches.includes(pr.base) ? branches : [pr.base, ...branches]);
+  return (
+    <div className="pr-title-edit">
+      <input
+        autoFocus
+        className="title-input"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") setEditing(false);
+        }}
+      />
+      <label className="muted small base-select">
+        base:{" "}
+        <select value={base} disabled={!options || pr.state !== "open"} onChange={(e) => setBase(e.target.value)}>
+          {(options ?? [pr.base]).map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
+        {pr.state !== "open" && " (reopen the PR to change its base)"}
+      </label>
+      <button className="btn primary" disabled={busy || !title.trim()} onClick={save}>
+        Save
+      </button>
+      <button className="btn" onClick={() => setEditing(false)}>
+        Cancel
+      </button>
+      {err && <div className="error">{err}</div>}
+    </div>
   );
 }

@@ -88,6 +88,9 @@ export const api = {
   listComments: (id: number) => req<Comment[]>(`/api/prs/${id}/comments`),
   addComment: (id: number, c: NewComment) =>
     req<Comment>(`/api/prs/${id}/comments`, { method: "POST", body: JSON.stringify(c) }),
+  editPr: (id: number, changes: Partial<Pick<Pr, "title" | "description" | "base">>) =>
+    req<Pr>(`/api/prs/${id}`, { method: "PATCH", body: JSON.stringify(changes) }),
+  listBranches: (id: number) => req<{ branches: string[] }>(`/api/prs/${id}/branches`),
   listReviews: (id: number) => req<Review[]>(`/api/prs/${id}/reviews`),
   submitReview: (id: number, state: ReviewState, body: string) =>
     req<Review>(`/api/prs/${id}/reviews`, { method: "POST", body: JSON.stringify({ state, body }) }),

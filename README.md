@@ -42,6 +42,7 @@ preflight comments 1 --unresolved          # latest review + threads, with file:
 preflight comments 1 --unresolved --json   # {state, latest_review, threads, event_cursor}
 preflight reply 3 "Fixed in abc123"
 preflight resolve 3
+preflight edit 1 --title "…" --base dev     # change title / base; --description - reads stdin
 preflight close 1                          # or reopen; closed PRs are hidden from `list` (use --all)
 preflight list
 ```
@@ -61,6 +62,7 @@ it prints the review and the unresolved comments. Reviewers may edit or delete c
 catch up with `preflight events <id> --since <cursor>` (the cursor is printed at the end, and
 `comments --json` includes it as `event_cursor`) before treating feedback as final.
 For each thread: make the fix, commit it to the same branch, then `preflight reply <comment-id> "<what you did>"`.
+Keep the description current with `preflight edit <id> --description -` (reads markdown from stdin).
 Don't resolve threads yourself unless asked; the reviewer resolves them.
 ```
 
@@ -69,7 +71,8 @@ Don't resolve threads yourself unless asked; the reviewer resolves them.
 | Method | Path | |
 |---|---|---|
 | GET/POST | `/api/prs` | list / create (`{repo, base, head, title, description}`) |
-| GET | `/api/prs/:id` | PR + base/head sha + commits |
+| GET/PATCH | `/api/prs/:id` | PR + base/head sha + commits / edit (`{title?, description?, base?}`) |
+| GET | `/api/prs/:id/branches` | branches that can be picked as the base |
 | GET | `/api/prs/:id/diff` | raw unified diff (`?from=<oid>&to=<oid>` for a range of the PR's commits) |
 | GET/POST | `/api/prs/:id/comments` | list / add (`{body, parent_id?, path?, line?, side?, line_text?, author?}`) |
 | GET/POST | `/api/prs/:id/reviews` | list / submit (`{state: approved\|changes_requested\|commented, body}`) |
