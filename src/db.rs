@@ -32,7 +32,7 @@ pub struct Review {
 }
 
 /// One change to a PR, so agents can catch up on everything (including edits and deletions)
-/// with `preflight events --since <id>`.
+/// with `preflight pr events --since <id>`.
 #[derive(Serialize, Clone)]
 pub struct Event {
     pub id: i64,

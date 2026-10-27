@@ -23,7 +23,7 @@ preflight serve      # http://localhost:7777  (--port or PREFLIGHT_PORT to chang
 Agent opens a preflight PR (diff is `base...head`, computed live, so new commits show up on reload):
 
 ```bash
-preflight create --repo /path/to/repo --base main --head my-feature --title "Add X" --description "Why…"
+preflight pr create --repo /path/to/repo --base main --head my-feature --title "Add X" --description "Why…"
 ```
 
 Review in the browser like on GitHub: syntax-highlighted diffs with a file tree, `+` on a line to comment (drag the `+` or shift-click line numbers to comment on several lines),
@@ -35,21 +35,22 @@ Click a commit to see just its changes, or check two commits (in the Conversatio
 Agent reads feedback and responds:
 
 ```bash
-preflight wait 1                           # block until the reviewer submits a review (--timeout N: exit 2)
-preflight wait 1 --any                     # ...or until any reviewer activity, printing what changed
-preflight events 1 --since 0               # everything that changed, incl. edited/deleted comments
-preflight comments 1 --unresolved          # latest review + threads, with file:line and the line's code
-preflight comments 1 --unresolved --json   # {state, latest_review, threads, event_cursor}
-preflight comment 1 "Ready for another look"                   # on the conversation
-preflight comment 1 "Why this?" --file src/a.rs --line 42      # on a diff line (--side old: deleted line)
-preflight comment 1 "…" --file src/a.rs --start-line 40 --line 42   # on a range; body "-" reads stdin
-preflight reply 3 "Fixed in abc123"
-preflight edit-comment 7 "Updated: …"       # only the agent's own comments; body "-" reads stdin
-preflight delete-comment 7
-preflight resolve 3
-preflight edit 1 --title "…" --base dev     # change title / base; --description - reads stdin
-preflight close 1                          # or reopen; closed PRs are hidden from `list` (use --all)
-preflight list
+preflight pr wait 1                    # block until the reviewer submits a review (--timeout N: exit 2)
+preflight pr wait 1 --any              # ...or until any reviewer activity, printing what changed
+preflight pr events 1 --since 0        # everything that changed, incl. edited/deleted comments
+preflight pr edit 1 --title "…" --base dev   # change title / base; --description - reads stdin
+preflight pr close 1                   # or reopen; closed PRs are hidden from `pr list` (use --all)
+preflight pr list
+
+preflight comment list 1 --unresolved          # latest review + threads, with file:line and the line's code
+preflight comment list 1 --unresolved --json   # {state, latest_review, threads, event_cursor}
+preflight comment create 1 "Ready for another look"                # on the conversation
+preflight comment create 1 "Why this?" --file src/a.rs --line 42   # on a diff line (--side old: deleted line)
+preflight comment create 1 "…" --file src/a.rs --start-line 40 --line 42   # a range; body "-" reads stdin
+preflight comment reply 3 "Fixed in abc123"
+preflight comment edit 7 "Updated: …"   # only the agent's own comments; body "-" reads stdin
+preflight comment delete 7
+preflight comment resolve 3
 ```
 
 State lives in SQLite at `~/.preflight/preflight.db` (override with `PREFLIGHT_DB`). The CLI works without the server running.
@@ -61,15 +62,15 @@ Paste into your agent's `CLAUDE.md` / `AGENTS.md`:
 ```markdown
 A "preflight PR" is a local review done with the `preflight` CLI, not a GitHub PR.
 When asked to open a preflight PR for a branch:
-`preflight create --repo . --base main --head <branch> --title "<title>" --description "<summary>"`
-and share the printed URL. Then run `preflight wait <id>` to block until the reviewer submits a review;
+`preflight pr create --repo . --base main --head <branch> --title "<title>" --description "<summary>"`
+and share the printed URL. Then run `preflight pr wait <id>` to block until the reviewer submits a review;
 it prints the review and the unresolved comments. Reviewers may edit or delete comments later, so
-catch up with `preflight events <id> --since <cursor>` (the cursor is printed at the end, and
-`comments --json` includes it as `event_cursor`) before treating feedback as final.
-For each thread: make the fix, commit it to the same branch, then `preflight reply <comment-id> "<what you did>"`.
+catch up with `preflight pr events <id> --since <cursor>` (the cursor is printed at the end, and
+`comment list --json` includes it as `event_cursor`) before treating feedback as final.
+For each thread: make the fix, commit it to the same branch, then `preflight comment reply <comment-id> "<what you did>"`.
 To point the reviewer at something (a question, a trade-off, a risky spot), comment on the diff with
-`preflight comment <id> "<note>" --file <path> --line <n>`; only lines shown in the diff can be commented on.
-Keep the description current with `preflight edit <id> --description -` (reads markdown from stdin).
+`preflight comment create <id> "<note>" --file <path> --line <n>`; only lines shown in the diff can be commented on.
+Keep the description current with `preflight pr edit <id> --description -` (reads markdown from stdin).
 Don't resolve threads yourself unless asked; the reviewer resolves them.
 ```
 

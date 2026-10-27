@@ -22,6 +22,16 @@ enum Cmd {
         #[arg(long, env = "PREFLIGHT_PORT", default_value_t = 7777)]
         port: u16,
     },
+    /// Create, list, edit and close PRs, and follow their activity
+    #[command(subcommand)]
+    Pr(PrCmd),
+    /// Read, add, reply to, edit, delete and resolve comments
+    #[command(subcommand)]
+    Comment(CommentCmd),
+}
+
+#[derive(Subcommand)]
+enum PrCmd {
     /// Open a preflight PR comparing <head> against <base>
     Create {
         /// Path to the git repo (any directory inside it)
@@ -48,15 +58,22 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show the latest review and the comments on a PR
-    Comments {
+    /// Change a PR's title, description or base branch
+    Edit {
         pr_id: i64,
-        /// Only show threads that are not resolved
         #[arg(long)]
-        unresolved: bool,
+        title: Option<String>,
+        /// New description (markdown); "-" reads it from stdin
         #[arg(long)]
-        json: bool,
+        description: Option<String>,
+        /// New target branch
+        #[arg(long)]
+        base: Option<String>,
     },
+    /// Close a PR (e.g. after it was pushed and merged remotely)
+    Close { pr_id: i64 },
+    /// Reopen a closed PR
+    Reopen { pr_id: i64 },
     /// Block until the reviewer submits a review, then print it with the unresolved comments
     Wait {
         pr_id: i64,
@@ -79,8 +96,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum CommentCmd {
+    /// Show the latest review and the comments on a PR
+    List {
+        pr_id: i64,
+        /// Only show threads that are not resolved
+        #[arg(long)]
+        unresolved: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Comment on a PR (as the agent): on the conversation, or on diff lines with --file/--line
-    Comment {
+    Create {
         pr_id: i64,
         /// Comment text (markdown); "-" reads it from stdin
         body: String,
@@ -109,7 +139,7 @@ enum Cmd {
         author: String,
     },
     /// Change the text of a comment you wrote (as the agent)
-    EditComment {
+    Edit {
         comment_id: i64,
         /// New text (markdown); "-" reads it from stdin
         body: String,
@@ -117,29 +147,13 @@ enum Cmd {
         author: String,
     },
     /// Delete a comment you wrote (as the agent); deleting a thread's first comment deletes its replies
-    DeleteComment {
+    Delete {
         comment_id: i64,
         #[arg(long, default_value = "agent")]
         author: String,
     },
     /// Mark a comment thread resolved
     Resolve { comment_id: i64 },
-    /// Change a PR's title, description or base branch
-    Edit {
-        pr_id: i64,
-        #[arg(long)]
-        title: Option<String>,
-        /// New description (markdown); "-" reads it from stdin
-        #[arg(long)]
-        description: Option<String>,
-        /// New target branch
-        #[arg(long)]
-        base: Option<String>,
-    },
-    /// Close a PR (e.g. after it was pushed and merged remotely)
-    Close { pr_id: i64 },
-    /// Reopen a closed PR
-    Reopen { pr_id: i64 },
 }
 
 fn port() -> u16 {
@@ -328,7 +342,7 @@ fn print_events(pr_id: i64, events: &[db::Event], cursor: i64, json: bool) -> Re
             other => println!("[{}] {} {other}", e.id, e.actor),
         }
     }
-    println!("\nNext: preflight events {pr_id} --since {cursor}");
+    println!("\nNext: preflight pr events {pr_id} --since {cursor}");
     Ok(())
 }
 
@@ -353,7 +367,7 @@ fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -
             "state": pr.state,
             "latest_review": latest_review,
             "threads": threads,
-            // Pass to `preflight events --since` to get only later changes.
+            // Pass to `preflight pr events --since` to get only later changes.
             "event_cursor": db::last_event_id(conn, pr_id)?,
         }));
     }
@@ -405,7 +419,7 @@ fn print_feedback(conn: &Connection, pr_id: i64, unresolved: bool, json: bool) -
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve { port } => tokio::runtime::Runtime::new()?.block_on(server::serve(port)),
-        Cmd::Create { repo, base, head, title, description, json } => {
+        Cmd::Pr(PrCmd::Create { repo, base, head, title, description, json }) => {
             let pr = create_pr(&repo, &base, &head, &title, &description)?;
             if json {
                 return print_json(&serde_json::json!({ "pr": pr, "url": pr_url(pr.id) }));
@@ -413,7 +427,7 @@ fn main() -> Result<()> {
             println!("Created preflight PR #{}: {}\n{}", pr.id, pr.title, pr_url(pr.id));
             Ok(())
         }
-        Cmd::List { all, json } => {
+        Cmd::Pr(PrCmd::List { all, json }) => {
             let prs: Vec<_> = db::list_prs(&db::open()?)?
                 .into_iter()
                 .filter(|p| all || p.state == "open")
@@ -426,15 +440,15 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Comments { pr_id, unresolved, json } => print_feedback(&db::open()?, pr_id, unresolved, json),
-        Cmd::Events { pr_id, since, json } => {
+        Cmd::Comment(CommentCmd::List { pr_id, unresolved, json }) => print_feedback(&db::open()?, pr_id, unresolved, json),
+        Cmd::Pr(PrCmd::Events { pr_id, since, json }) => {
             let conn = db::open()?;
             load_pr(&conn, pr_id)?;
             let events = db::list_events(&conn, pr_id, since)?;
             let cursor = events.last().map_or(since, |e| e.id);
             print_events(pr_id, &events, cursor, json)
         }
-        Cmd::Wait { pr_id, any, timeout, json } => {
+        Cmd::Pr(PrCmd::Wait { pr_id, any, timeout, json }) => {
             let conn = db::open()?;
             load_pr(&conn, pr_id)?;
             let seen = db::list_reviews(&conn, pr_id)?.last().map_or(0, |r| r.id);
@@ -459,7 +473,7 @@ fn main() -> Result<()> {
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
-        Cmd::Comment { pr_id, body, file, line, start_line, side, author, json } => {
+        Cmd::Comment(CommentCmd::Create { pr_id, body, file, line, start_line, side, author, json }) => {
             let conn = db::open()?;
             let pr = load_pr(&conn, pr_id)?;
             let body = if body == "-" { std::io::read_to_string(std::io::stdin())?.trim_end().to_string() } else { body };
@@ -492,7 +506,7 @@ fn main() -> Result<()> {
             println!("Added comment #{} on {}\n{}", c.id, comment_loc(&c), pr_url(pr_id));
             Ok(())
         }
-        Cmd::Reply { comment_id, body, author } => {
+        Cmd::Comment(CommentCmd::Reply { comment_id, body, author }) => {
             let conn = db::open()?;
             let parent = db::get_comment(&conn, comment_id)?.context("comment not found")?;
             let root = parent.parent_id.unwrap_or(parent.id);
@@ -511,7 +525,7 @@ fn main() -> Result<()> {
             println!("Replied with comment #{}", c.id);
             Ok(())
         }
-        Cmd::EditComment { comment_id, body, author } => {
+        Cmd::Comment(CommentCmd::Edit { comment_id, body, author }) => {
             let conn = db::open()?;
             own_comment(&conn, comment_id, &author)?;
             let body = if body == "-" { std::io::read_to_string(std::io::stdin())?.trim_end().to_string() } else { body };
@@ -520,21 +534,21 @@ fn main() -> Result<()> {
             println!("Edited comment #{comment_id}");
             Ok(())
         }
-        Cmd::DeleteComment { comment_id, author } => {
+        Cmd::Comment(CommentCmd::Delete { comment_id, author }) => {
             let conn = db::open()?;
             own_comment(&conn, comment_id, &author)?;
             db::delete_comment(&conn, comment_id, &author)?;
             println!("Deleted comment #{comment_id}");
             Ok(())
         }
-        Cmd::Resolve { comment_id } => {
+        Cmd::Comment(CommentCmd::Resolve { comment_id }) => {
             let conn = db::open()?;
             db::get_comment(&conn, comment_id)?.context("comment not found")?;
             db::set_resolved(&conn, comment_id, true, "agent")?;
             println!("Resolved #{comment_id}");
             Ok(())
         }
-        Cmd::Edit { pr_id, title, description, base } => {
+        Cmd::Pr(PrCmd::Edit { pr_id, title, description, base }) => {
             let conn = db::open()?;
             let pr = load_pr(&conn, pr_id)?;
             let description = match description.as_deref() {
@@ -549,7 +563,7 @@ fn main() -> Result<()> {
             println!("Updated PR #{}: {}  ({} <- {})\n{}", pr.id, pr.title, pr.base, pr.head, pr_url(pr.id));
             Ok(())
         }
-        Cmd::Close { pr_id } => set_state(pr_id, "closed"),
-        Cmd::Reopen { pr_id } => set_state(pr_id, "open"),
+        Cmd::Pr(PrCmd::Close { pr_id }) => set_state(pr_id, "closed"),
+        Cmd::Pr(PrCmd::Reopen { pr_id }) => set_state(pr_id, "open"),
     }
 }

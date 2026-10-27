@@ -58,7 +58,7 @@ function PrList() {
       </div>
       {all.length === 0 && (
         <div className="box-row muted">
-          No PRs yet. Create one with <code>preflight create --repo . --base main --head my-branch --title "…"</code>
+          No PRs yet. Create one with <code>preflight pr create --repo . --base main --head my-branch --title "…"</code>
         </div>
       )}
       {prs.map((p) => (
