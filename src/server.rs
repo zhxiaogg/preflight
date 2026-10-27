@@ -57,16 +57,16 @@ async fn create_pr(Json(b): Json<CreatePr>) -> ApiResult {
 }
 
 /// Commits a PR currently points at.
-struct Refs {
-    base: String,
-    head: String,
-    base_missing: bool,
-    head_missing: bool,
+pub struct Refs {
+    pub base: String,
+    pub head: String,
+    pub base_missing: bool,
+    pub head_missing: bool,
 }
 
 /// Resolves the PR's branches, falling back to the last seen commit when a branch was deleted
 /// (like GitHub, a PR stays viewable after its branch is gone).
-fn resolve(pr: &db::Pr) -> Result<Refs, ApiError> {
+pub fn resolve(pr: &db::Pr) -> anyhow::Result<Refs> {
     // A closed PR is frozen at the commits it had when it was closed.
     if let (true, Some(base), Some(head)) = (pr.state == "closed", &pr.base_sha, &pr.head_sha) {
         return Ok(Refs {

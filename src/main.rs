@@ -79,6 +79,28 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Comment on a PR (as the agent): on the conversation, or on diff lines with --file/--line
+    Comment {
+        pr_id: i64,
+        /// Comment text (markdown); "-" reads it from stdin
+        body: String,
+        /// File to comment on, as named in the diff
+        #[arg(long, requires = "line")]
+        file: Option<String>,
+        /// Line to comment on; with --start-line, the last line of the range
+        #[arg(long, requires = "file")]
+        line: Option<i64>,
+        /// First line of a multi-line comment
+        #[arg(long, requires = "line")]
+        start_line: Option<i64>,
+        /// Which side the line numbers refer to: "new" (head) or "old" (deleted lines)
+        #[arg(long, default_value = "new", value_parser = ["new", "old"])]
+        side: String,
+        #[arg(long, default_value = "agent")]
+        author: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Reply to a comment thread (as the agent)
     Reply {
         comment_id: i64,
@@ -122,6 +144,32 @@ pub fn create_pr(repo: &str, base: &str, head: &str, title: &str, desc: &str) ->
     let pr = db::create_pr(&conn, &root, base, head, title, desc)?;
     db::set_shas(&conn, pr.id, &base_sha, &head_sha)?;
     load_pr(&conn, pr.id)
+}
+
+/// The diff text of lines `start..=end` of `path` (same side), which must be in one hunk of the
+/// PR's diff: like GitHub, only lines shown in the diff can be commented on.
+fn diff_snippet(pr: &db::Pr, path: &str, side: &str, start: i64, end: i64) -> Result<String> {
+    anyhow::ensure!(start <= end, "--start-line must not be after --line");
+    let refs = server::resolve(pr)?;
+    let diff = git::diff(&pr.repo, &refs.base, &refs.head)?;
+    let rows = git::diff_rows(&diff, path).with_context(|| format!("{path} is not changed in PR #{}", pr.id))?;
+    let no = |r: &git::DiffRow| if side == "old" { r.old } else { r.new };
+    let find = |n: i64| rows.iter().position(|r| no(r) == Some(n));
+    let shown = || {
+        let mut ranges: Vec<String> = Vec::new();
+        for hunk in 1..=rows.last().map_or(0, |r| r.hunk) {
+            let nos: Vec<i64> = rows.iter().filter(|r| r.hunk == hunk).filter_map(no).collect();
+            if let (Some(a), Some(b)) = (nos.first(), nos.last()) {
+                ranges.push(format!("{a}-{b}"));
+            }
+        }
+        format!("lines shown on the {side} side of {path}: {}", ranges.join(", "))
+    };
+    let (Some(lo), Some(hi)) = (find(start), find(end)) else {
+        anyhow::bail!("line {} is not in the diff ({})", if find(start).is_none() { start } else { end }, shown());
+    };
+    anyhow::ensure!(rows[lo].hunk == rows[hi].hunk, "lines {start}-{end} span several hunks ({})", shown());
+    Ok(rows[lo..=hi].iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n"))
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -389,6 +437,39 @@ fn main() -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
+        }
+        Cmd::Comment { pr_id, body, file, line, start_line, side, author, json } => {
+            let conn = db::open()?;
+            let pr = load_pr(&conn, pr_id)?;
+            let body = if body == "-" { std::io::read_to_string(std::io::stdin())?.trim_end().to_string() } else { body };
+            anyhow::ensure!(!body.trim().is_empty(), "comment body is empty");
+            let mut n = db::NewComment {
+                parent_id: None,
+                author,
+                body,
+                path: None,
+                line: None,
+                side: None,
+                start_line: None,
+                start_side: None,
+                line_text: None,
+            };
+            if let (Some(path), Some(line)) = (file, line) {
+                n.line_text = Some(diff_snippet(&pr, &path, &side, start_line.unwrap_or(line), line)?);
+                if start_line.is_some_and(|s| s != line) {
+                    n.start_line = start_line;
+                    n.start_side = Some(side.clone());
+                }
+                n.path = Some(path);
+                n.line = Some(line);
+                n.side = Some(side);
+            }
+            let c = db::add_comment(&conn, pr_id, &n)?;
+            if json {
+                return print_json(&c);
+            }
+            println!("Added comment #{} on {}\n{}", c.id, comment_loc(&c), pr_url(pr_id));
+            Ok(())
         }
         Cmd::Reply { comment_id, body, author } => {
             let conn = db::open()?;

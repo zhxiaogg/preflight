@@ -40,6 +40,9 @@ preflight wait 1 --any                     # ...or until any reviewer activity, 
 preflight events 1 --since 0               # everything that changed, incl. edited/deleted comments
 preflight comments 1 --unresolved          # latest review + threads, with file:line and the line's code
 preflight comments 1 --unresolved --json   # {state, latest_review, threads, event_cursor}
+preflight comment 1 "Ready for another look"                   # on the conversation
+preflight comment 1 "Why this?" --file src/a.rs --line 42      # on a diff line (--side old: deleted line)
+preflight comment 1 "…" --file src/a.rs --start-line 40 --line 42   # on a range; body "-" reads stdin
 preflight reply 3 "Fixed in abc123"
 preflight resolve 3
 preflight edit 1 --title "…" --base dev     # change title / base; --description - reads stdin
@@ -62,6 +65,8 @@ it prints the review and the unresolved comments. Reviewers may edit or delete c
 catch up with `preflight events <id> --since <cursor>` (the cursor is printed at the end, and
 `comments --json` includes it as `event_cursor`) before treating feedback as final.
 For each thread: make the fix, commit it to the same branch, then `preflight reply <comment-id> "<what you did>"`.
+To point the reviewer at something (a question, a trade-off, a risky spot), comment on the diff with
+`preflight comment <id> "<note>" --file <path> --line <n>`; only lines shown in the diff can be commented on.
 Keep the description current with `preflight edit <id> --description -` (reads markdown from stdin).
 Don't resolve threads yourself unless asked; the reviewer resolves them.
 ```

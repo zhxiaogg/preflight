@@ -69,3 +69,54 @@ pub fn commits(repo: &str, base: &str, head: &str) -> Result<Vec<Commit>> {
         })
         .collect())
 }
+
+/// A line shown in a file's diff, i.e. a line a reviewer can comment on.
+pub struct DiffRow {
+    /// Index of the hunk the line belongs to.
+    pub hunk: usize,
+    /// Line number on the old side (context and deleted lines).
+    pub old: Option<i64>,
+    /// Line number on the new side (context and added lines).
+    pub new: Option<i64>,
+    pub text: String,
+}
+
+/// The rows of `path`'s diff in display order, or None when the diff doesn't touch `path`.
+/// `path` is the new path, or the old one for a deleted file (as the web UI names files).
+pub fn diff_rows(diff: &str, path: &str) -> Option<Vec<DiffRow>> {
+    let mut files: Vec<(String, String, bool, Vec<DiffRow>)> = Vec::new();
+    let (mut old, mut new, mut hunks) = (0, 0, 0);
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            let (a, b) = rest.rsplit_once(" b/").unwrap_or((rest, rest));
+            files.push((a.to_string(), b.to_string(), false, Vec::new()));
+            hunks = 0;
+            continue;
+        }
+        let Some((_, _, deleted, rows)) = files.last_mut() else { continue };
+        if let Some(header) = line.strip_prefix("@@ -") {
+            // "@@ -<old>[,n] +<new>[,n] @@"
+            let num = |s: &str| s.split(',').next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            let mut parts = header.split_whitespace();
+            old = parts.next().map_or(0, num);
+            new = parts.next().map_or(0, |p| num(p.trim_start_matches('+')));
+            hunks += 1;
+        } else if hunks == 0 {
+            *deleted |= line.starts_with("deleted file mode");
+        } else if let Some(text) = line.strip_prefix('+') {
+            rows.push(DiffRow { hunk: hunks, old: None, new: Some(new), text: text.into() });
+            new += 1;
+        } else if let Some(text) = line.strip_prefix('-') {
+            rows.push(DiffRow { hunk: hunks, old: Some(old), new: None, text: text.into() });
+            old += 1;
+        } else if let Some(text) = line.strip_prefix(' ') {
+            rows.push(DiffRow { hunk: hunks, old: Some(old), new: Some(new), text: text.into() });
+            old += 1;
+            new += 1;
+        }
+    }
+    files
+        .into_iter()
+        .find(|(a, b, deleted, _)| if *deleted { a == path } else { b == path })
+        .map(|(_, _, _, rows)| rows)
+}
