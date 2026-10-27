@@ -44,6 +44,8 @@ preflight comment 1 "Ready for another look"                   # on the conversa
 preflight comment 1 "Why this?" --file src/a.rs --line 42      # on a diff line (--side old: deleted line)
 preflight comment 1 "…" --file src/a.rs --start-line 40 --line 42   # on a range; body "-" reads stdin
 preflight reply 3 "Fixed in abc123"
+preflight edit-comment 7 "Updated: …"       # only the agent's own comments; body "-" reads stdin
+preflight delete-comment 7
 preflight resolve 3
 preflight edit 1 --title "…" --base dev     # change title / base; --description - reads stdin
 preflight close 1                          # or reopen; closed PRs are hidden from `list` (use --all)

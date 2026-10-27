@@ -108,6 +108,20 @@ enum Cmd {
         #[arg(long, default_value = "agent")]
         author: String,
     },
+    /// Change the text of a comment you wrote (as the agent)
+    EditComment {
+        comment_id: i64,
+        /// New text (markdown); "-" reads it from stdin
+        body: String,
+        #[arg(long, default_value = "agent")]
+        author: String,
+    },
+    /// Delete a comment you wrote (as the agent); deleting a thread's first comment deletes its replies
+    DeleteComment {
+        comment_id: i64,
+        #[arg(long, default_value = "agent")]
+        author: String,
+    },
     /// Mark a comment thread resolved
     Resolve { comment_id: i64 },
     /// Change a PR's title, description or base branch
@@ -170,6 +184,13 @@ fn diff_snippet(pr: &db::Pr, path: &str, side: &str, start: i64, end: i64) -> Re
     };
     anyhow::ensure!(rows[lo].hunk == rows[hi].hunk, "lines {start}-{end} span several hunks ({})", shown());
     Ok(rows[lo..=hi].iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n"))
+}
+
+/// Loads a comment, refusing to change someone else's (e.g. the reviewer's).
+fn own_comment(conn: &Connection, id: i64, author: &str) -> Result<db::Comment> {
+    let c = db::get_comment(conn, id)?.with_context(|| format!("comment #{id} not found"))?;
+    anyhow::ensure!(c.author == author, "comment #{id} was written by {}, not {author}", c.author);
+    Ok(c)
 }
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -488,6 +509,22 @@ fn main() -> Result<()> {
             };
             let c = db::add_comment(&conn, parent.pr_id, &n)?;
             println!("Replied with comment #{}", c.id);
+            Ok(())
+        }
+        Cmd::EditComment { comment_id, body, author } => {
+            let conn = db::open()?;
+            own_comment(&conn, comment_id, &author)?;
+            let body = if body == "-" { std::io::read_to_string(std::io::stdin())?.trim_end().to_string() } else { body };
+            anyhow::ensure!(!body.trim().is_empty(), "comment body is empty");
+            db::edit_comment(&conn, comment_id, &body)?;
+            println!("Edited comment #{comment_id}");
+            Ok(())
+        }
+        Cmd::DeleteComment { comment_id, author } => {
+            let conn = db::open()?;
+            own_comment(&conn, comment_id, &author)?;
+            db::delete_comment(&conn, comment_id, &author)?;
+            println!("Deleted comment #{comment_id}");
             Ok(())
         }
         Cmd::Resolve { comment_id } => {
