@@ -67,6 +67,12 @@ pub struct Refs {
 /// Resolves the PR's branches, falling back to the last seen commit when a branch was deleted
 /// (like GitHub, a PR stays viewable after its branch is gone).
 pub fn resolve(pr: &db::Pr) -> anyhow::Result<Refs> {
+    anyhow::ensure!(
+        std::path::Path::new(&pr.repo).exists(),
+        "{} no longer exists (a removed worktree?). Point the PR at the main repo: preflight pr edit {} --repo <path>",
+        pr.repo,
+        pr.id
+    );
     // A closed PR is frozen at the commits it had when it was closed.
     if let (true, Some(base), Some(head)) = (pr.state == "closed", &pr.base_sha, &pr.head_sha) {
         return Ok(Refs {
@@ -186,7 +192,7 @@ struct EditPr {
 async fn edit_pr(Path(id): Path<i64>, Json(b): Json<EditPr>) -> ApiResult {
     let pr = load_pr(id)?;
     let conn = db::open()?;
-    let pr = crate::edit_pr(&conn, &pr, b.title.as_deref(), b.description.as_deref(), b.base.as_deref(), "user")?;
+    let pr = crate::edit_pr(&conn, &pr, b.title.as_deref(), b.description.as_deref(), b.base.as_deref(), None, "user")?;
     Ok(Json(json!(pr)))
 }
 

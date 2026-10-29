@@ -148,6 +148,19 @@ pub fn open() -> Result<Connection> {
             conn.execute_batch(ddl)?;
         }
     }
+    // v1: PRs opened inside a linked worktree point at its main repo, so they survive the worktree.
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        for pr in list_prs(&conn)? {
+            match crate::git::main_repo(&pr.repo) {
+                Ok(root) if root != pr.repo => {
+                    conn.execute("UPDATE prs SET repo = ?1 WHERE id = ?2", params![root, pr.id])?;
+                }
+                _ => {}
+            }
+        }
+        conn.execute_batch("PRAGMA user_version = 1")?;
+    }
     Ok(conn)
 }
 
@@ -233,6 +246,7 @@ pub fn update_pr(
     title: Option<&str>,
     description: Option<&str>,
     base: Option<&str>,
+    repo: Option<&str>,
     actor: &str,
 ) -> Result<Pr> {
     let old = get_pr(c, id)?.context("pr not found")?;
@@ -241,6 +255,7 @@ pub fn update_pr(
         ("title", &old.title, title),
         ("description", &old.description, description),
         ("base", &old.base, base),
+        ("repo", &old.repo, repo),
     ] {
         let Some(new_value) = new_value.filter(|v| *v != old_value.as_str()) else { continue };
         // `field` comes from the fixed list above, so it is safe to splice into the SQL.

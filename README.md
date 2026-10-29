@@ -39,6 +39,7 @@ preflight pr wait 1                    # block until the reviewer submits a revi
 preflight pr wait 1 --any              # ...or until any reviewer activity, printing what changed
 preflight pr events 1 --since 0        # everything that changed, incl. edited/deleted comments
 preflight pr edit 1 --title "…" --base dev   # change title / base; --description - reads stdin
+preflight pr edit 1 --repo ~/src/app       # repoint at another checkout (e.g. after its worktree was removed)
 preflight pr close 1                   # or reopen; closed PRs are hidden from `pr list` (use --all)
 preflight pr list
 
@@ -53,6 +54,7 @@ preflight comment delete 7
 preflight comment resolve 3
 ```
 
+PRs created inside a git worktree are stored against the main repo, so they keep working after the worktree is removed.
 State lives in SQLite at `~/.preflight/preflight.db` (override with `PREFLIGHT_DB`). The CLI works without the server running.
 
 ## Agent instructions snippet

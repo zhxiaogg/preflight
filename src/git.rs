@@ -9,8 +9,13 @@ fn git(repo: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub fn toplevel(repo: &str) -> Result<String> {
-    Ok(git(repo, &["rev-parse", "--show-toplevel"])?.trim().to_string())
+/// The main repo that `path` belongs to: for a linked worktree, the repo it was added from. Worktrees
+/// share the main repo's branches and commits, so PRs stored with this path keep working after the
+/// worktree is removed. Bare repos and submodules resolve to their git dir, where git works too.
+pub fn main_repo(path: &str) -> Result<String> {
+    let dir = git(path, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+    let dir = dir.trim();
+    Ok(dir.strip_suffix("/.git").unwrap_or(dir).to_string())
 }
 
 pub fn rev_parse(repo: &str, rev: &str) -> Result<String> {

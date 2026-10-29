@@ -58,7 +58,7 @@ enum PrCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Change a PR's title, description or base branch
+    /// Change a PR's title, description, base branch or repo
     Edit {
         pr_id: i64,
         #[arg(long)]
@@ -69,6 +69,9 @@ enum PrCmd {
         /// New target branch
         #[arg(long)]
         base: Option<String>,
+        /// Another checkout of the same repo, e.g. the main repo after the PR's worktree was removed
+        #[arg(long)]
+        repo: Option<String>,
     },
     /// Close a PR (e.g. after it was pushed and merged remotely)
     Close { pr_id: i64 },
@@ -165,7 +168,7 @@ fn pr_url(id: i64) -> String {
 }
 
 pub fn create_pr(repo: &str, base: &str, head: &str, title: &str, desc: &str) -> Result<db::Pr> {
-    let root = git::toplevel(repo).with_context(|| format!("{repo} is not a git repo"))?;
+    let root = git::main_repo(repo).with_context(|| format!("{repo} is not a git repo"))?;
     let base_sha = git::rev_parse(&root, base).with_context(|| format!("unknown base '{base}'"))?;
     let head_sha = git::rev_parse(&root, head).with_context(|| format!("unknown head '{head}'"))?;
     let conn = db::open()?;
@@ -234,17 +237,30 @@ pub fn edit_pr(
     title: Option<&str>,
     description: Option<&str>,
     base: Option<&str>,
+    repo: Option<&str>,
     actor: &str,
 ) -> Result<db::Pr> {
     let title = title.map(str::trim);
     anyhow::ensure!(title != Some(""), "title can't be empty");
+    // Moving a PR to another checkout (e.g. after its worktree was removed): it must have the PR's commits.
+    let repo = match repo {
+        Some(path) => {
+            let root = git::main_repo(path).with_context(|| format!("{path} is not a git repo"))?;
+            for (branch, sha) in [(&pr.base, &pr.base_sha), (&pr.head, &pr.head_sha)] {
+                let rev = sha.as_deref().unwrap_or(branch);
+                git::rev_parse(&root, rev).with_context(|| format!("{root} doesn't have '{branch}' ({rev})"))?;
+            }
+            Some(root)
+        }
+        None => None,
+    };
     if let Some(base) = base.filter(|b| *b != pr.base) {
         // A closed PR is frozen at its final commits; changing its base would make that misleading.
         anyhow::ensure!(pr.state == "open", "reopen the PR before changing its base");
         anyhow::ensure!(base != pr.head, "base can't be the same as the head branch");
-        git::rev_parse(&pr.repo, base).with_context(|| format!("unknown base '{base}'"))?;
+        git::rev_parse(repo.as_deref().unwrap_or(&pr.repo), base).with_context(|| format!("unknown base '{base}'"))?;
     }
-    db::update_pr(conn, pr.id, title, description, base, actor)
+    db::update_pr(conn, pr.id, title, description, base, repo.as_deref(), actor)
 }
 
 fn set_state(pr_id: i64, state: &str) -> Result<()> {
@@ -327,7 +343,7 @@ fn print_events(pr_id: i64, events: &[db::Event], cursor: i64, json: bool) -> Re
             }
             "pr_edited" => {
                 println!("[{}] {} edited the PR", e.id, e.actor);
-                for field in ["title", "base"] {
+                for field in ["title", "base", "repo"] {
                     if let Some(ch) = e.data.get(field) {
                         println!("    {field}: {} → {}", ch["old"].as_str().unwrap_or(""), ch["new"].as_str().unwrap_or(""));
                     }
@@ -548,7 +564,7 @@ fn main() -> Result<()> {
             println!("Resolved #{comment_id}");
             Ok(())
         }
-        Cmd::Pr(PrCmd::Edit { pr_id, title, description, base }) => {
+        Cmd::Pr(PrCmd::Edit { pr_id, title, description, base, repo }) => {
             let conn = db::open()?;
             let pr = load_pr(&conn, pr_id)?;
             let description = match description.as_deref() {
@@ -556,10 +572,11 @@ fn main() -> Result<()> {
                 _ => description,
             };
             anyhow::ensure!(
-                title.is_some() || description.is_some() || base.is_some(),
-                "nothing to change: pass --title, --description or --base"
+                title.is_some() || description.is_some() || base.is_some() || repo.is_some(),
+                "nothing to change: pass --title, --description, --base or --repo"
             );
-            let pr = edit_pr(&conn, &pr, title.as_deref(), description.as_deref(), base.as_deref(), "cli")?;
+            let (title, description, base) = (title.as_deref(), description.as_deref(), base.as_deref());
+            let pr = edit_pr(&conn, &pr, title, description, base, repo.as_deref(), "cli")?;
             println!("Updated PR #{}: {}  ({} <- {})\n{}", pr.id, pr.title, pr.base, pr.head, pr_url(pr.id));
             Ok(())
         }
