@@ -40,37 +40,85 @@ function PrList() {
   const [all, setAll] = useState<Pr[] | null>(null);
   const [err, setErr] = useState("");
   const [show, setShow] = useState<Pr["state"]>("open");
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [actionErr, setActionErr] = useState("");
+  const load = () => api.listPrs().then(setAll, (e) => setErr(String(e)));
   useEffect(() => {
-    api.listPrs().then(setAll, (e) => setErr(String(e)));
+    load();
   }, []);
   if (err) return <div className="error">{err}</div>;
   if (!all) return <div className="muted">Loading…</div>;
   const prs = all.filter((p) => p.state === show);
   const count = (st: Pr["state"]) => all.filter((p) => p.state === st).length;
+  const picked = prs.filter((p) => selected.has(p.id));
+  const allPicked = prs.length > 0 && picked.length === prs.length;
+  const toggle = (id: number) => {
+    const next = new Set(selected);
+    if (!next.delete(id)) next.add(id);
+    setSelected(next);
+  };
+  const switchTo = (st: Pr["state"]) => {
+    setShow(st);
+    setSelected(new Set());
+  };
+  const target = show === "open" ? "closed" : "open";
+  const apply = async () => {
+    setBusy(true);
+    setActionErr("");
+    const results = await Promise.allSettled(picked.map((p) => api.setState(p.id, target)));
+    const failed = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    if (failed.length) setActionErr(`${failed.length} of ${picked.length} failed: ${failed[0].reason}`);
+    setSelected(new Set());
+    setBusy(false);
+    load();
+  };
   return (
     <div className="box">
       <div className="box-header list-filter">
-        {(["open", "closed"] as const).map((st) => (
-          <button key={st} className={show === st ? "active" : ""} onClick={() => setShow(st)}>
-            {count(st)} {st === "open" ? "Open" : "Closed"}
-          </button>
-        ))}
+        {prs.length > 0 && (
+          <input
+            type="checkbox"
+            aria-label="Select all"
+            checked={allPicked}
+            ref={(el) => el && (el.indeterminate = picked.length > 0 && !allPicked)}
+            onChange={() => setSelected(new Set(allPicked ? [] : prs.map((p) => p.id)))}
+          />
+        )}
+        {picked.length > 0 ? (
+          <>
+            <span className="selected-count">{picked.length} selected</span>
+            <button className="btn" disabled={busy} onClick={apply}>
+              {show === "open" ? "Close" : "Reopen"} {picked.length} pull request{picked.length === 1 ? "" : "s"}
+            </button>
+          </>
+        ) : (
+          (["open", "closed"] as const).map((st) => (
+            <button key={st} className={show === st ? "active" : ""} onClick={() => switchTo(st)}>
+              {count(st)} {st === "open" ? "Open" : "Closed"}
+            </button>
+          ))
+        )}
       </div>
+      {actionErr && <div className="box-row error">{actionErr}</div>}
       {all.length === 0 && (
         <div className="box-row muted">
           No PRs yet. Create one with <code>preflight pr create --repo . --base main --head my-branch --title "…"</code>
         </div>
       )}
       {prs.map((p) => (
-        <a key={p.id} className="box-row pr-row" href={`/pr/${p.id}`}>
-          <div className="pr-title">
-            <span className={`state-dot ${p.state}`} /> {p.title}
-          </div>
-          <div className="muted small">
-            #{p.id} · {p.repo} · <span className="branch">{p.base}</span> ← <span className="branch">{p.head}</span> ·
-            opened {timeAgo(p.created_at)}
-          </div>
-        </a>
+        <div key={p.id} className={`box-row pr-row${selected.has(p.id) ? " selected" : ""}`}>
+          <input type="checkbox" aria-label={`Select #${p.id}`} checked={selected.has(p.id)} onChange={() => toggle(p.id)} />
+          <a className="pr-link" href={`/pr/${p.id}`}>
+            <div className="pr-title">
+              <span className={`state-dot ${p.state}`} /> {p.title}
+            </div>
+            <div className="muted small">
+              #{p.id} · {p.repo} · <span className="branch">{p.base}</span> ← <span className="branch">{p.head}</span> ·
+              opened {timeAgo(p.created_at)}
+            </div>
+          </a>
+        </div>
       ))}
     </div>
   );

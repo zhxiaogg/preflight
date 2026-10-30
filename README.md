@@ -50,7 +50,7 @@ preflight pr wait 1 --any              # ...or until any reviewer activity, prin
 preflight pr events 1 --since 0        # everything that changed, incl. edited/deleted comments
 preflight pr edit 1 --title "…" --base dev   # change title / base; --description - reads stdin
 preflight pr edit 1 --repo ~/src/app       # repoint at another checkout (e.g. after its worktree was removed)
-preflight pr close 1                   # or reopen; closed PRs are hidden from `pr list` (use --all)
+preflight pr close 1 2 3               # or reopen; closed PRs are hidden from `pr list` (use --all)
 preflight pr list
 
 preflight comment list 1 --unresolved          # latest review + threads, with file:line and the line's code

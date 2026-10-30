@@ -73,10 +73,16 @@ enum PrCmd {
         #[arg(long)]
         repo: Option<String>,
     },
-    /// Close a PR (e.g. after it was pushed and merged remotely)
-    Close { pr_id: i64 },
-    /// Reopen a closed PR
-    Reopen { pr_id: i64 },
+    /// Close one or more PRs (e.g. after they were pushed and merged remotely)
+    Close {
+        #[arg(required = true)]
+        pr_ids: Vec<i64>,
+    },
+    /// Reopen one or more closed PRs
+    Reopen {
+        #[arg(required = true)]
+        pr_ids: Vec<i64>,
+    },
     /// Block until the reviewer submits a review, then print it with the unresolved comments
     Wait {
         pr_id: i64,
@@ -263,12 +269,15 @@ pub fn edit_pr(
     db::update_pr(conn, pr.id, title, description, base, repo.as_deref(), actor)
 }
 
-fn set_state(pr_id: i64, state: &str) -> Result<()> {
+fn set_state(pr_ids: &[i64], state: &str) -> Result<()> {
     let conn = db::open()?;
-    let pr = load_pr(&conn, pr_id)?;
-    snapshot_shas(&conn, &pr)?;
-    db::set_pr_state(&conn, pr_id, state, "cli")?;
-    println!("PR #{pr_id} is now {state}");
+    // Load every PR first so a bad id changes nothing.
+    let prs = pr_ids.iter().map(|&id| load_pr(&conn, id)).collect::<Result<Vec<_>>>()?;
+    for pr in prs {
+        snapshot_shas(&conn, &pr)?;
+        db::set_pr_state(&conn, pr.id, state, "cli")?;
+        println!("PR #{} is now {state}", pr.id);
+    }
     Ok(())
 }
 
@@ -580,7 +589,7 @@ fn main() -> Result<()> {
             println!("Updated PR #{}: {}  ({} <- {})\n{}", pr.id, pr.title, pr.base, pr.head, pr_url(pr.id));
             Ok(())
         }
-        Cmd::Pr(PrCmd::Close { pr_id }) => set_state(pr_id, "closed"),
-        Cmd::Pr(PrCmd::Reopen { pr_id }) => set_state(pr_id, "open"),
+        Cmd::Pr(PrCmd::Close { pr_ids }) => set_state(&pr_ids, "closed"),
+        Cmd::Pr(PrCmd::Reopen { pr_ids }) => set_state(&pr_ids, "open"),
     }
 }

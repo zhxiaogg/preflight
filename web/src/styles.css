@@ -79,7 +79,12 @@ code, pre, .code, .num, .branch {
 .box-header { background: var(--bg-subtle); padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .box-row { display: block; padding: 10px 16px; border-top: 1px solid var(--border); color: inherit; }
 .box-header + .box-row { border-top: none; }
-.pr-row:hover { background: var(--bg-subtle); text-decoration: none; }
+.pr-row { display: flex; align-items: flex-start; gap: 12px; }
+.pr-row:hover, .pr-row.selected { background: var(--bg-subtle); }
+.pr-row input[type="checkbox"] { margin-top: 5px; }
+.pr-link { flex: 1; min-width: 0; color: inherit; }
+.pr-link:hover { text-decoration: none; }
+.pr-link:hover .pr-title { color: var(--accent); }
 .pr-title { font-weight: 600; font-size: 16px; }
 
 .branch { background: var(--hunk-bg); color: var(--accent); padding: 2px 6px; border-radius: 6px; }
@@ -213,7 +218,12 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .markdown img { max-width: 100%; }
 
 /* PR list filter + state dots. */
-.list-filter { display: flex; gap: 12px; }
+.list-filter { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+.list-filter .selected-count { font-weight: 600; }
+.list-filter .btn {
+  margin-left: auto; padding: 3px 12px; border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+}
+.list-filter .btn:disabled { opacity: 0.6; cursor: default; }
 .list-filter button { background: none; border: none; color: var(--muted); font: inherit; cursor: pointer; padding: 0; }
 .list-filter button.active { color: var(--fg); font-weight: 600; }
 .state-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--green); vertical-align: 1px; }
