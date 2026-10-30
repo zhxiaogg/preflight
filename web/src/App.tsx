@@ -124,11 +124,12 @@ function PrList() {
   );
 }
 
-type Tab = "conversation" | "files";
+type Tab = "conversation" | "commits" | "files";
 
 // Each view has its own URL, like GitHub, so the browser's back/forward buttons step through them:
-// /pr/<id>, /pr/<id>/files, /pr/<id>/files/<oid> and /pr/<id>/files/<from>..<to>.
+// /pr/<id>, /pr/<id>/commits, /pr/<id>/files, /pr/<id>/files/<oid> and /pr/<id>/files/<from>..<to>.
 function parseRoute(): { tab: Tab; range: CommitRange | null } {
+  if (/^\/pr\/\d+\/commits\/?$/.test(window.location.pathname)) return { tab: "commits", range: null };
   const m = window.location.pathname.match(/^\/pr\/\d+\/files(?:\/([0-9a-f]+)(?:\.\.([0-9a-f]+))?)?\/?$/);
   if (!m) return { tab: "conversation", range: null };
   return { tab: "files", range: m[1] ? { from: m[1], to: m[2] ?? m[1] } : null };
@@ -136,6 +137,7 @@ function parseRoute(): { tab: Tab; range: CommitRange | null } {
 
 function routeUrl(prId: number, tab: Tab, range: CommitRange | null) {
   if (tab === "conversation") return `/pr/${prId}`;
+  if (tab === "commits") return `/pr/${prId}/commits`;
   if (!range) return `/pr/${prId}/files`;
   return `/pr/${prId}/files/${range.from === range.to ? range.from : `${range.from}..${range.to}`}`;
 }
@@ -304,6 +306,9 @@ function PrPage({ id }: { id: number }) {
         <button className={tab === "conversation" ? "active" : ""} onClick={() => switchTab("conversation")}>
           Conversation <span className="count">{roots.length}</span>
         </button>
+        <button className={tab === "commits" ? "active" : ""} onClick={() => switchTab("commits")}>
+          Commits <span className="count">{detail.commits.length}</span>
+        </button>
         <button className={tab === "files" ? "active" : ""} onClick={() => switchTab("files")}>
           Files changed <span className="count">{files.length}</span>
         </button>
@@ -332,6 +337,8 @@ function PrPage({ id }: { id: number }) {
           onSetState={setState}
           onEditDescription={(description) => editPr({ description })}
         />
+      ) : tab === "commits" ? (
+        <CommitsPage prId={id} commits={detail.commits} onOpen={(r) => switchTab("files", r)} />
       ) : range ? (
         rangeErr ? (
           <div className="banner">
@@ -463,16 +470,12 @@ function Conversation(props: {
   onEditDescription: (description: string) => Promise<void>;
 }) {
   const [editingDescription, setEditingDescription] = useState(false);
-  // Commits checked for comparing, across all commit groups.
-  const [endpoints, setEndpoints] = useState<string[]>([]);
   const { detail, files, comments, actions } = props;
   // Inline threads whose line no longer exists in the current diff are "outdated".
   const texts = useMemo(() => lineTexts(files), [files]);
   const roots = comments.filter((c) => c.parent_id === null);
   const initial = detail.commits.filter((c) => c.time <= detail.pr.created_at).reverse();
   const timeline = buildTimeline(detail, roots, props.reviews);
-  const selection = rangeFromEndpoints(detail.commits, endpoints);
-  const lastGroup = timeline.filter((e) => e.kind === "commits").pop();
   const thread = (r: Comment) => (
     <ConversationThread
       key={r.id}
@@ -520,16 +523,7 @@ function Conversation(props: {
           </div>
         </div>
         {initial.length > 0 && (
-          <CommitGroup
-            bare
-            prId={detail.pr.id}
-            all={detail.commits}
-            commits={initial}
-            endpoints={endpoints}
-            onEndpoints={setEndpoints}
-            showCompare={selection ? initial.some((c) => c.oid === selection.to) : !lastGroup && detail.commits.length > 1}
-            onOpen={props.onOpenCommits}
-          />
+          <CommitGroup bare prId={detail.pr.id} commits={initial} onOpen={props.onOpenCommits} />
         )}
       </div>
       <div className="timeline">
@@ -539,14 +533,7 @@ function Conversation(props: {
               <CommitGroup
                 key={`c${e.commits[0].oid}`}
                 prId={detail.pr.id}
-                all={detail.commits}
                 commits={e.commits}
-                endpoints={endpoints}
-                onEndpoints={setEndpoints}
-                // The compare button sits under the group holding the newest checked commit.
-                showCompare={
-                  selection ? e.commits.some((c) => c.oid === selection.to) : e === lastGroup && detail.commits.length > 1
-                }
                 onOpen={props.onOpenCommits}
               />
             );
@@ -674,24 +661,15 @@ function ActivityItem({ event: e }: { event: Activity }) {
   );
 }
 
-/** Consecutive commits in the timeline: click one to view it, or check two (in any group) to compare. */
+/** Consecutive commits in the timeline; click one to see its changes. */
 function CommitGroup(props: {
   /** The PR's initial commits, listed under the description without a timeline header. */
   bare?: boolean;
   prId: number;
-  /** All of the PR's commits, newest first, for working out the compared range. */
-  all: Commit[];
   /** This group's commits, oldest first. */
   commits: Commit[];
-  endpoints: string[];
-  onEndpoints: (e: string[]) => void;
-  showCompare: boolean;
   onOpen: (r: CommitRange) => void;
 }) {
-  const { all, endpoints } = props;
-  const selection = rangeFromEndpoints(all, endpoints);
-  const [lo, hi] = coveredBy(all, selection);
-  const count = selection ? hi - lo + 1 : 0;
   const n = props.commits.length;
   return (
     <div className={props.bare ? "commits initial-commits" : "tl-item tl-event commits"}>
@@ -703,33 +681,59 @@ function CommitGroup(props: {
             <span className="muted">{timeAgo(props.commits[n - 1].time)}</span>
           </div>
         )}
-        {props.commits.map((c) => {
-          const i = all.indexOf(c);
-          return (
-            <CommitRow
-              key={c.oid}
-              prId={props.prId}
-              commit={c}
-              checked={endpoints.includes(c.oid)}
-              included={i >= lo && i <= hi}
-              disabled={endpoints.length === 2 && !endpoints.includes(c.oid)}
-              onToggle={() => props.onEndpoints(toggleEndpoint(endpoints, c.oid) ?? endpoints)}
-              onOpen={() => props.onOpen({ from: c.oid, to: c.oid })}
-            />
-          );
-        })}
-        {props.showCompare && (
-          <div className="commit-compare muted small">
-            {selection ? (
-              <button className="btn" onClick={() => props.onOpen(selection)}>
-                View changes in {count} commit{count === 1 ? "" : "s"}
-              </button>
-            ) : (
-              "Check two commits to compare all changes between them."
-            )}
-          </div>
+        {props.commits.map((c) => (
+          <CommitRow key={c.oid} prId={props.prId} commit={c} onOpen={() => props.onOpen({ from: c.oid, to: c.oid })} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The Commits tab: click a commit to see its changes, or check two to compare everything between them. */
+function CommitsPage(props: { prId: number; commits: Commit[]; onOpen: (r: CommitRange) => void }) {
+  const [endpoints, setEndpoints] = useState<string[]>([]);
+  const { commits } = props;
+  const selection = rangeFromEndpoints(commits, endpoints);
+  const [lo, hi] = coveredBy(commits, selection);
+  const count = selection ? hi - lo + 1 : 0;
+  if (commits.length === 0)
+    return (
+      <div className="box">
+        <div className="box-row muted">No commits.</div>
+      </div>
+    );
+  return (
+    <div className="box commits-page">
+      <div className="box-header commits-page-head">
+        {selection ? (
+          <>
+            <span>
+              {count} commit{count === 1 ? "" : "s"} selected
+            </span>
+            <button className="btn" onClick={() => props.onOpen(selection)}>
+              View changes
+            </button>
+          </>
+        ) : (
+          <span className="muted">
+            {commits.length > 1 ? "Check two commits to compare all changes between them." : "1 commit"}
+          </span>
         )}
       </div>
+      {commits.map((c, i) => (
+        <div key={c.oid} className="box-row">
+          <CommitRow
+            prId={props.prId}
+            commit={c}
+            checked={endpoints.includes(c.oid)}
+            included={i >= lo && i <= hi}
+            disabled={endpoints.length === 2 && !endpoints.includes(c.oid)}
+            onToggle={() => setEndpoints(toggleEndpoint(endpoints, c.oid) ?? endpoints)}
+            onOpen={() => props.onOpen({ from: c.oid, to: c.oid })}
+            showTime
+          />
+        </div>
+      ))}
     </div>
   );
 }
@@ -1805,23 +1809,27 @@ function ReviewPanel(props: { pending: number; onSubmit: (body: string) => Promi
 function CommitRow(props: {
   prId: number;
   commit: PrDetail["commits"][number];
-  checked: boolean;
+  checked?: boolean;
   /** Between two checked commits, so part of the compared changes. */
-  included: boolean;
-  disabled: boolean;
-  onToggle: () => void;
+  included?: boolean;
+  disabled?: boolean;
+  /** Shows a checkbox to pick the commit as an end of a compared range. */
+  onToggle?: () => void;
   onOpen: () => void;
+  showTime?: boolean;
 }) {
   const { commit: c } = props;
   return (
     <div className={`commit-row ${props.included ? "included" : ""}`}>
-      <input
-        type="checkbox"
-        checked={props.checked}
-        disabled={props.disabled}
-        title={props.disabled ? "Uncheck a commit first: you can compare two commits" : "Select to compare"}
-        onChange={props.onToggle}
-      />
+      {props.onToggle && (
+        <input
+          type="checkbox"
+          checked={props.checked}
+          disabled={props.disabled}
+          title={props.disabled ? "Uncheck a commit first: you can compare two commits" : "Select to compare"}
+          onChange={props.onToggle}
+        />
+      )}
       <a
         href={routeUrl(props.prId, "files", { from: c.oid, to: c.oid })}
         title="Show the changes in this commit"
@@ -1832,6 +1840,7 @@ function CommitRow(props: {
       >
         <code>{c.sha}</code> {c.subject}
       </a>
+      {props.showTime && <span className="commit-time muted small">{timeAgo(c.time)}</span>}
     </div>
   );
 }

@@ -325,7 +325,10 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .commit-row.included { background: var(--hunk-bg); }
 .commit-row input { margin: 0; cursor: pointer; }
 .commit-row input:disabled { cursor: not-allowed; }
-.commit-compare { padding: 6px 6px 0; }
+.commit-time { margin-left: auto; white-space: nowrap; }
+.commits-page .box-row { padding: 6px 10px; }
+.commits-page-head { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+.commits-page-head .btn { margin-left: auto; }
 .commit-menu .commit-row { padding: 8px 12px; border-radius: 0; border-top: 1px solid var(--border); }
 .diffstat { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .commit-picker { position: relative; }
