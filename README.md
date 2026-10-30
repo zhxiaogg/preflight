@@ -4,6 +4,8 @@ Preflight PRs: review LLM agent work locally *before* it becomes a remote PR.
 The agent opens a "preflight PR" between two local branches, you review it in a GitHub-like
 web UI on localhost, and the agent reads your comments back via the CLI.
 
+![Reviewing a preflight PR in split view, with a reviewer comment and the agent's reply](docs/screenshot.png)
+
 ## Build
 
 Requires Rust and Node.js. `cargo build` also builds the React app (`web/`) and embeds it in the binary.
