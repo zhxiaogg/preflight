@@ -185,6 +185,7 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .diff .num { text-align: right; color: var(--muted); user-select: none; }
 .diff .code { white-space: pre-wrap; word-break: break-all; position: relative; padding-left: 22px; }
 .diff .sign { position: absolute; left: 8px; user-select: none; }
+.diff.split.select-old td.code.side-new, .diff.split.select-new td.code.side-old { user-select: none; }
 .diff tr.add .code { background: var(--add-bg); }
 .diff tr.add .num { background: var(--add-num); }
 .diff tr.del .code { background: var(--del-bg); }

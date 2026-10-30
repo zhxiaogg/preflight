@@ -1133,6 +1133,8 @@ function FileDiffTable(props: {
   const [down, setDown] = useState<Record<number, number>>({});
   const [up, setUp] = useState<Record<number, number>>({});
   const [tail, setTail] = useState(0);
+  // Split view: the side whose code can be selected (the one the last mouse press landed on).
+  const [selectSide, setSelectSide] = useState<Side>("new");
   const contentHtml = useMemo(() => content && highlightText(path, content.join("\n")), [content, path]);
   const canExpand = f.status === "modified" || f.status === "renamed";
 
@@ -1269,7 +1271,15 @@ function FileDiffTable(props: {
   }
 
   return (
-    <table className={`diff ${split ? "split" : ""}`}>
+    <table
+      className={`diff ${split ? `split select-${selectSide}` : ""}`}
+      // Text selection stays on the side where it starts, so copying gets one version of the code.
+      onMouseDown={(e) => {
+        const cell = (e.target as HTMLElement).closest("td.code");
+        if (cell?.classList.contains("side-old")) setSelectSide("old");
+        else if (cell?.classList.contains("side-new")) setSelectSide("new");
+      }}
+    >
       <colgroup>
         {split ? (
           <>
@@ -1344,7 +1354,7 @@ function SplitRow(props: { left: LineView | null; right: LineView | null; commen
     if (!v)
       return [
         <td key={`${side}-num`} className={`num empty ${edge}`} />,
-        <td key={`${side}-code`} className="code empty" />,
+        <td key={`${side}-code`} className={`code empty side-${side}`} />,
       ];
     const cls = `${v.line.kind} ${v.expanded ? "expanded" : ""} ${v.selected ? "selected" : ""}`;
     const numClick = v.onNumClick && ((e: React.MouseEvent) => v.onNumClick!(e.shiftKey));
@@ -1357,7 +1367,7 @@ function SplitRow(props: { left: LineView | null; right: LineView | null; commen
       >
         {side === "old" ? v.line.oldNo : v.line.newNo}
       </td>,
-      <td key={`${side}-code`} className={`code ${cls}`} onMouseEnter={v.onMouseEnter}>
+      <td key={`${side}-code`} className={`code side-${side} ${cls}`} onMouseEnter={v.onMouseEnter}>
         <LineCode v={v} commentable={!(context && side === "old")} />
       </td>,
     ];
