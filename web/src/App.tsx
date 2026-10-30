@@ -489,6 +489,11 @@ function FilesChanged(props: {
     saveViewed(props.prId, next);
     setCollapsed({ ...collapsed, [path]: !isViewed(i) });
   };
+  const [split, setSplitState] = useState(loadSplit);
+  const setSplit = (v: boolean) => {
+    setSplitState(v);
+    saveSplit(v);
+  };
   const [sel, setSel] = useState<LineSelection | null>(null);
   // A drag that started on a "+" ends wherever the mouse is released.
   useEffect(() => {
@@ -546,6 +551,14 @@ function FilesChanged(props: {
           {picker}
           {files.length} files changed <span className="add-text">+{adds}</span> <span className="del-text">−{dels}</span>
           {props.loading && <span>Loading…</span>}
+          <span className="view-toggle">
+            <button className={split ? "" : "active"} onClick={() => setSplit(false)}>
+              Unified
+            </button>
+            <button className={split ? "active" : ""} onClick={() => setSplit(true)}>
+              Split
+            </button>
+          </span>
           {!range && (
             <span className="viewed-count">
               {files.filter((_, i) => isViewed(i)).length} / {files.length} viewed
@@ -593,6 +606,7 @@ function FilesChanged(props: {
                     sel={sel?.path === path ? sel : null}
                     setSel={setSel}
                     rev={range?.to}
+                    split={split}
                   />
                 ))}
             </div>
@@ -601,6 +615,23 @@ function FilesChanged(props: {
       </div>
     </div>
   );
+}
+
+// Unified or split diffs, remembered per browser like the "Viewed" marks.
+function loadSplit(): boolean {
+  try {
+    return localStorage.getItem("preflight:diff-view") === "split";
+  } catch {
+    return false;
+  }
+}
+
+function saveSplit(split: boolean) {
+  try {
+    localStorage.setItem("preflight:diff-view", split ? "split" : "unified");
+  } catch {
+    // Not persisting the choice is fine.
+  }
 }
 
 function fileAnchor(path: string) {
@@ -749,8 +780,10 @@ function FileDiffTable(props: {
   setSel: (s: LineSelection | null) => void;
   /** Commit being viewed, for a partial (commit range) diff; read-only, and context comes from it. */
   rev?: string;
+  /** Side-by-side view: old lines on the left, new lines on the right. */
+  split: boolean;
 }) {
-  const { file: f, threadsByLine, comments, actions, sel, setSel } = props;
+  const { file: f, threadsByLine, comments, actions, sel, setSel, split } = props;
   const path = filePath(f);
   // Index of the hunk header each line belongs to; a selection can't cross hunks.
   const hunkOf = useMemo(() => {
@@ -790,22 +823,32 @@ function FileDiffTable(props: {
     ensureContent().then(() => set((m) => ({ ...m, [hunk]: (m[hunk] ?? 0) + EXPAND_STEP })), () => {});
   const expandTail = () => ensureContent().then(() => setTail((t) => t + EXPAND_STEP), () => {});
 
-  const contextRow = (newNo: number, oldNo: number) => (
-    <DiffRow
-      key={`x${newNo}`}
-      line={{ kind: "ctx", text: content![newNo - 1] ?? "", oldNo, newNo }}
-      html={contentHtml?.[newNo - 1]}
-      expanded
-      threads={[]}
-      comments={comments}
-      actions={actions}
-      composing={false}
-      onCancel={() => {}}
-      onSubmit={async () => {}}
-    />
-  );
+  const contextRow = (newNo: number, oldNo: number): DiffItem => ({
+    key: `x${newNo}`,
+    view: {
+      line: { kind: "ctx", text: content![newNo - 1] ?? "", oldNo, newNo },
+      html: contentHtml?.[newNo - 1],
+      expanded: true,
+      threads: [],
+      composing: false,
+      onCancel: () => {},
+      onSubmit: async () => {},
+    },
+  });
+  // The expand buttons sit in the line-number column(s), the hunk text spans the rest.
+  const hunkRow = (key: string, buttons: React.ReactNode, text: React.ReactNode): DiffItem => ({
+    key,
+    row: (
+      <tr key={key} className="hunk">
+        <td colSpan={split ? 1 : 2} className="expander">
+          {buttons}
+        </td>
+        <td colSpan={split ? 3 : 1}>{text}</td>
+      </tr>
+    ),
+  });
 
-  const rows: JSX.Element[] = [];
+  const rows: DiffItem[] = [];
   let lastNew = 0;
   let lastOld = 0;
   f.lines.forEach((l, i) => {
@@ -820,8 +863,9 @@ function FileDiffTable(props: {
       // Once a gap is fully expanded the hunks merge and the header disappears, as on GitHub.
       if (hidden > 0 || (i === 0 && gap === 0))
         rows.push(
-          <tr key={`h${i}`} className="hunk">
-            <td colSpan={2} className="expander">
+          hunkRow(
+            `h${i}`,
+            <>
               {hidden > 0 && lastNew > 0 && (
                 <button title="Expand down" onClick={() => expand(setDown, i)}>
                   ↓
@@ -832,9 +876,9 @@ function FileDiffTable(props: {
                   ↑
                 </button>
               )}
-            </td>
-            <td>{l.text}</td>
-          </tr>,
+            </>,
+            l.text,
+          ),
         );
       for (let n = start - upShown; n < start; n++) rows.push(contextRow(n, n - delta));
       return;
@@ -844,22 +888,20 @@ function FileDiffTable(props: {
     const side: Side = l.kind === "del" ? "old" : "new";
     const lineNo = (side === "old" ? l.oldNo : l.newNo)!;
     const k = lineKey(path, side, lineNo);
-    rows.push(
-      <DiffRow
-        key={i}
-        line={l}
-        html={props.html?.[i]}
-        selected={i >= lo && i <= hi}
-        onAddMouseDown={props.rev ? undefined : (shift) => select(i, shift, !shift)}
-        onNumClick={props.rev ? undefined : (shift) => select(i, shift, false)}
-        onMouseEnter={props.rev ? undefined : () => sel?.dragging && extendable(i) && setSel({ ...sel, head: i })}
-        threads={threadsByLine.get(k) ?? []}
-        comments={comments}
-        actions={actions}
-        composing={i === hi && !sel!.dragging}
-        composeLabel={lo < hi ? `Commenting on ${hi - lo + 1} lines` : undefined}
-        onCancel={() => setSel(null)}
-        onSubmit={async (body) => {
+    rows.push({
+      key: String(i),
+      view: {
+        line: l,
+        html: props.html?.[i],
+        selected: i >= lo && i <= hi,
+        onAddMouseDown: props.rev ? undefined : (shift) => select(i, shift, !shift),
+        onNumClick: props.rev ? undefined : (shift) => select(i, shift, false),
+        onMouseEnter: props.rev ? undefined : () => sel?.dragging && extendable(i) && setSel({ ...sel, head: i }),
+        threads: threadsByLine.get(k) ?? [],
+        composing: i === hi && !sel!.dragging,
+        composeLabel: lo < hi ? `Commenting on ${hi - lo + 1} lines` : undefined,
+        onCancel: () => setSel(null),
+        onSubmit: async (body) => {
           const start = f.lines[lo];
           const startSide: Side = start.kind === "del" ? "old" : "new";
           await actions.addComment({
@@ -874,9 +916,9 @@ function FileDiffTable(props: {
               .join("\n"),
           });
           setSel(null);
-        }}
-      />,
-    );
+        },
+      },
+    });
   });
 
   // Lines after the last hunk. Until the file is fetched we can't know whether any exist.
@@ -886,38 +928,141 @@ function FileDiffTable(props: {
     for (let n = lastNew + 1; n <= lastNew + shown; n++) rows.push(contextRow(n, n - (lastNew - lastOld)));
     if (remaining - shown > 0)
       rows.push(
-        <tr key="tail" className="hunk">
-          <td colSpan={2} className="expander">
-            <button title="Expand down" onClick={expandTail}>
-              ↓
-            </button>
-          </td>
-          <td>{loadErr}</td>
-        </tr>,
+        hunkRow(
+          "tail",
+          <button title="Expand down" onClick={expandTail}>
+            ↓
+          </button>,
+          loadErr,
+        ),
       );
   }
 
   return (
-    <table className="diff">
+    <table className={`diff ${split ? "split" : ""}`}>
       <colgroup>
-        <col className="num-col" />
-        <col className="num-col" />
-        <col />
+        {split ? (
+          <>
+            <col className="num-col" />
+            <col />
+            <col className="num-col" />
+            <col />
+          </>
+        ) : (
+          <>
+            <col className="num-col" />
+            <col className="num-col" />
+            <col />
+          </>
+        )}
       </colgroup>
-      <tbody>{rows}</tbody>
+      <tbody>
+        {split
+          ? splitRows(rows, comments, actions)
+          : rows.map((r) =>
+              "row" in r ? r.row : <DiffRow key={r.key} {...r.view} comments={comments} actions={actions} />,
+            )}
+      </tbody>
     </table>
   );
 }
 
-function DiffRow(props: {
+/** A row of a file's diff: a hunk header (or expander), or a line. */
+type DiffItem = { key: string; row: JSX.Element } | { key: string; view: LineView };
+
+/**
+ * Lays the lines out side by side, like GitHub's split view: unchanged lines on both sides, and
+ * each run of deleted lines on the left next to the lines added in their place on the right.
+ */
+function splitRows(items: DiffItem[], comments: Comment[], actions: Actions): JSX.Element[] {
+  const rows: JSX.Element[] = [];
+  let dels: { key: string; view: LineView }[] = [];
+  let adds: { key: string; view: LineView }[] = [];
+  const pair = (key: string, left: LineView | null, right: LineView | null) =>
+    rows.push(<SplitRow key={key} left={left} right={right} comments={comments} actions={actions} />);
+  const flush = () => {
+    for (let k = 0; k < Math.max(dels.length, adds.length); k++)
+      pair((dels[k] ?? adds[k]).key, dels[k]?.view ?? null, adds[k]?.view ?? null);
+    dels = [];
+    adds = [];
+  };
+  for (const it of items) {
+    if ("row" in it) {
+      flush();
+      rows.push(it.row);
+    } else if (it.view.line.kind === "del") {
+      if (adds.length) flush();
+      dels.push(it);
+    } else if (it.view.line.kind === "add") {
+      adds.push(it);
+    } else {
+      flush();
+      pair(it.key, it.view, it.view);
+    }
+  }
+  flush();
+  return rows;
+}
+
+/** One line of the split view: the old side's line (or nothing) and the new side's. */
+function SplitRow(props: { left: LineView | null; right: LineView | null; comments: Comment[]; actions: Actions }) {
+  const { left, right } = props;
+  // An unchanged line is the same view on both sides; its comments (side "new") go on the right.
+  const context = left === right;
+  const half = (v: LineView | null, side: Side) => {
+    const edge = side === "new" ? "split-right" : "";
+    if (!v)
+      return [
+        <td key={`${side}-num`} className={`num empty ${edge}`} />,
+        <td key={`${side}-code`} className="code empty" />,
+      ];
+    const cls = `${v.line.kind} ${v.expanded ? "expanded" : ""} ${v.selected ? "selected" : ""}`;
+    const numClick = v.onNumClick && ((e: React.MouseEvent) => v.onNumClick!(e.shiftKey));
+    return [
+      <td
+        key={`${side}-num`}
+        className={`num ${cls} ${edge} ${numClick ? "clickable" : ""}`}
+        onClick={numClick}
+        onMouseEnter={v.onMouseEnter}
+      >
+        {side === "old" ? v.line.oldNo : v.line.newNo}
+      </td>,
+      <td key={`${side}-code`} className={`code ${cls}`} onMouseEnter={v.onMouseEnter}>
+        <LineCode v={v} commentable={!(context && side === "old")} />
+      </td>,
+    ];
+  };
+  const threads = (v: LineView | null, side: Side) =>
+    v && !(context && side === "old") && (v.threads.length > 0 || v.composing) ? (
+      <LineThreads v={v} comments={props.comments} actions={props.actions} />
+    ) : null;
+  const [lt, rt] = [threads(left, "old"), threads(right, "new")];
+  return (
+    <>
+      <tr className="line">
+        {half(left, "old")}
+        {half(right, "new")}
+      </tr>
+      {(lt || rt) && (
+        <tr className="inline-threads">
+          <td colSpan={2}>{lt}</td>
+          <td colSpan={2} className="split-right">
+            {rt}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+/** What a diff line shows and how it reacts; rendered as a unified row or one half of a split row. */
+type LineView = {
   line: DiffLine;
   /** Unchanged line revealed by expanding context; not commentable since it's outside the diff. */
   expanded?: boolean;
   /** Syntax-highlighted line (escaped by highlight.js), if the language is known. */
   html?: string;
   threads: Comment[];
-  comments: Comment[];
-  actions: Actions;
   selected?: boolean;
   composing: boolean;
   composeLabel?: string;
@@ -928,9 +1073,10 @@ function DiffRow(props: {
   onMouseEnter?: () => void;
   onCancel: () => void;
   onSubmit: (body: string) => Promise<void>;
-}) {
+};
+
+function DiffRow(props: LineView & { comments: Comment[]; actions: Actions }) {
   const { line: l, threads, composing } = props;
-  const sign = l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ";
   const numClick = props.onNumClick && ((e: React.MouseEvent) => props.onNumClick!(e.shiftKey));
   return (
     <>
@@ -945,42 +1091,62 @@ function DiffRow(props: {
           {l.newNo ?? ""}
         </td>
         <td className="code">
-          {props.onAddMouseDown && (
-            <button
-              className="add-comment"
-              title="Add a comment (drag or shift-click to select lines)"
-              onMouseDown={(e) => {
-                e.preventDefault(); // don't start a text selection while dragging
-                props.onAddMouseDown!(e.shiftKey);
-              }}
-            >
-              +
-            </button>
-          )}
-          <span className="sign">{sign}</span>
-          {props.html !== undefined ? <span dangerouslySetInnerHTML={{ __html: props.html }} /> : l.text}
+          <LineCode v={props} commentable />
         </td>
       </tr>
       {(threads.length > 0 || composing) && (
         <tr className="inline-threads">
           <td colSpan={3}>
-            {threads.map((t) => (
-              <Thread key={t.id} root={t} comments={props.comments} actions={props.actions} />
-            ))}
-            {composing && (
-              <div className="box inline-composer">
-                {props.composeLabel && <div className="muted small compose-label">{props.composeLabel}</div>}
-                <CommentForm
-                  autoFocus
-                  placeholder="Leave a comment"
-                  submitLabel="Add comment"
-                  onSubmit={props.onSubmit}
-                  onCancel={props.onCancel}
-                />
-              </div>
-            )}
+            <LineThreads v={props} comments={props.comments} actions={props.actions} />
           </td>
         </tr>
+      )}
+    </>
+  );
+}
+
+/** A line's code cell contents: the "+" comment button, the +/- sign and the (highlighted) text. */
+function LineCode({ v, commentable }: { v: LineView; commentable: boolean }) {
+  const sign = v.line.kind === "add" ? "+" : v.line.kind === "del" ? "-" : " ";
+  return (
+    <>
+      {commentable && v.onAddMouseDown && (
+        <button
+          className="add-comment"
+          title="Add a comment (drag or shift-click to select lines)"
+          onMouseDown={(e) => {
+            e.preventDefault(); // don't start a text selection while dragging
+            v.onAddMouseDown!(e.shiftKey);
+          }}
+        >
+          +
+        </button>
+      )}
+      <span className="sign">{sign}</span>
+      {v.html !== undefined ? <span dangerouslySetInnerHTML={{ __html: v.html }} /> : v.line.text}
+    </>
+  );
+}
+
+/** The threads on a line, and the comment form while commenting on it. */
+function LineThreads(props: { v: LineView; comments: Comment[]; actions: Actions }) {
+  const { v } = props;
+  return (
+    <>
+      {v.threads.map((t) => (
+        <Thread key={t.id} root={t} comments={props.comments} actions={props.actions} />
+      ))}
+      {v.composing && (
+        <div className="box inline-composer">
+          {v.composeLabel && <div className="muted small compose-label">{v.composeLabel}</div>}
+          <CommentForm
+            autoFocus
+            placeholder="Leave a comment"
+            submitLabel="Add comment"
+            onSubmit={v.onSubmit}
+            onCancel={v.onCancel}
+          />
+        </div>
       )}
     </>
   );

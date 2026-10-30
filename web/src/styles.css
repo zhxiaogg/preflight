@@ -314,3 +314,26 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .pr-title-edit .error { flex-basis: 100%; }
 .box-header { display: flex; align-items: baseline; gap: 4px; }
 .header-action { margin-left: auto; }
+
+/* Unified / split toggle in the Files changed toolbar. */
+.view-toggle { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.view-toggle button {
+  border: none; background: var(--bg); color: var(--fg); padding: 3px 10px; font: inherit; cursor: pointer;
+}
+.view-toggle button + button { border-left: 1px solid var(--border); }
+.view-toggle button.active { background: var(--accent); color: #fff; }
+
+/* Split view: old lines on the left, new on the right; colors live on cells rather than rows. */
+.diff.split td.code.add { background: var(--add-bg); }
+.diff.split td.num.add { background: var(--add-num); }
+.diff.split td.code.del { background: var(--del-bg); }
+.diff.split td.num.del { background: var(--del-num); }
+.diff.split td.code.expanded, .diff.split td.empty { background: var(--bg-subtle); }
+.diff.split td.selected { background: var(--selected-bg) !important; }
+.diff.split td.num.selected { color: var(--fg); }
+.diff.split .split-right { border-left: 1px solid var(--border); }
+.diff.split tr.line:hover .add-comment { opacity: 0; }
+.diff.split tr.line td.code:hover .add-comment { opacity: 1; }
+/* Half-width threads: let the reply box shrink and the footer wrap instead of clipping. */
+.diff.split .thread-footer { flex-wrap: wrap; }
+.diff.split .reply-stub { min-width: 0; }
