@@ -121,6 +121,8 @@ code, pre, .code, .num, .branch {
 .tl-content { flex: 1; min-width: 0; }
 .tl-event .tl-content { padding-top: 6px; }
 .tl-content .agent { color: #8250df; }
+.pr-opening { margin-bottom: 16px; }
+.initial-commits { margin-top: 12px; padding-left: 12px; }
 .tl-footer { margin-left: 44px; padding-top: 8px; border-top: 2px solid var(--border); }
 .commits-head { margin-bottom: 4px; }
 .review-head { padding: 6px 0 8px; }

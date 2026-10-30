@@ -427,7 +427,10 @@ type Entry =
 
 function buildTimeline(detail: PrDetail, roots: Comment[], reviews: Review[]): Entry[] {
   const items: Entry[] = [
-    ...detail.commits.map((c): Entry => ({ kind: "commits", at: c.time, commits: [c] })),
+    // The commits the PR was opened with are listed above the timeline.
+    ...detail.commits
+      .filter((c) => c.time > detail.pr.created_at)
+      .map((c): Entry => ({ kind: "commits", at: c.time, commits: [c] })),
     // Threads published by a review are shown under that review.
     ...roots.filter((c) => c.review_id === null).map((c): Entry => ({ kind: "thread", at: c.created_at, root: c })),
     ...reviews.map((r): Entry => ({ kind: "review", at: r.created_at, review: r })),
@@ -466,6 +469,7 @@ function Conversation(props: {
   // Inline threads whose line no longer exists in the current diff are "outdated".
   const texts = useMemo(() => lineTexts(files), [files]);
   const roots = comments.filter((c) => c.parent_id === null);
+  const initial = detail.commits.filter((c) => c.time <= detail.pr.created_at).reverse();
   const timeline = buildTimeline(detail, roots, props.reviews);
   const selection = rangeFromEndpoints(detail.commits, endpoints);
   const lastGroup = timeline.filter((e) => e.kind === "commits").pop();
@@ -482,40 +486,53 @@ function Conversation(props: {
 
   return (
     <div className="conversation">
-      <div className="timeline">
-        <div className="tl-item">
-          <Badge icon="comment" />
-          <div className="tl-content box">
-            <div className="box-header">
-              <b className="agent">agent</b> <span className="muted">opened this PR {timeAgo(detail.pr.created_at)}</span>
-              {!editingDescription && (
-                <button className="link-btn header-action" onClick={() => setEditingDescription(true)}>
-                  Edit
-                </button>
-              )}
-            </div>
-            <div className="comment-body">
-              {editingDescription ? (
-                <CommentForm
-                  autoFocus
-                  allowEmpty
-                  initial={detail.pr.description}
-                  placeholder="Describe the changes (markdown)"
-                  submitLabel="Update description"
-                  onCancel={() => setEditingDescription(false)}
-                  onSubmit={async (body) => {
-                    await props.onEditDescription(body);
-                    setEditingDescription(false);
-                  }}
-                />
-              ) : detail.pr.description ? (
-                <Markdown text={detail.pr.description} />
-              ) : (
-                <span className="muted">No description provided.</span>
-              )}
-            </div>
+      {/* What's under review (the description and the commits the PR was opened with) comes first,
+          outside the timeline of what happened since. */}
+      <div className="pr-opening">
+        <div className="box">
+          <div className="box-header">
+            <b className="agent">agent</b> <span className="muted">opened this PR {timeAgo(detail.pr.created_at)}</span>
+            {!editingDescription && (
+              <button className="link-btn header-action" onClick={() => setEditingDescription(true)}>
+                Edit
+              </button>
+            )}
+          </div>
+          <div className="comment-body">
+            {editingDescription ? (
+              <CommentForm
+                autoFocus
+                allowEmpty
+                initial={detail.pr.description}
+                placeholder="Describe the changes (markdown)"
+                submitLabel="Update description"
+                onCancel={() => setEditingDescription(false)}
+                onSubmit={async (body) => {
+                  await props.onEditDescription(body);
+                  setEditingDescription(false);
+                }}
+              />
+            ) : detail.pr.description ? (
+              <Markdown text={detail.pr.description} />
+            ) : (
+              <span className="muted">No description provided.</span>
+            )}
           </div>
         </div>
+        {initial.length > 0 && (
+          <CommitGroup
+            bare
+            prId={detail.pr.id}
+            all={detail.commits}
+            commits={initial}
+            endpoints={endpoints}
+            onEndpoints={setEndpoints}
+            showCompare={selection ? initial.some((c) => c.oid === selection.to) : !lastGroup && detail.commits.length > 1}
+            onOpen={props.onOpenCommits}
+          />
+        )}
+      </div>
+      <div className="timeline">
         {timeline.map((e) => {
           if (e.kind === "commits")
             return (
@@ -659,6 +676,8 @@ function ActivityItem({ event: e }: { event: Activity }) {
 
 /** Consecutive commits in the timeline: click one to view it, or check two (in any group) to compare. */
 function CommitGroup(props: {
+  /** The PR's initial commits, listed under the description without a timeline header. */
+  bare?: boolean;
   prId: number;
   /** All of the PR's commits, newest first, for working out the compared range. */
   all: Commit[];
@@ -675,13 +694,15 @@ function CommitGroup(props: {
   const count = selection ? hi - lo + 1 : 0;
   const n = props.commits.length;
   return (
-    <div className="tl-item tl-event commits">
-      <Badge icon="commit" />
+    <div className={props.bare ? "commits initial-commits" : "tl-item tl-event commits"}>
+      {!props.bare && <Badge icon="commit" />}
       <div className="tl-content">
-        <div className="commits-head">
-          <b className="agent">agent</b> added {n} commit{n === 1 ? "" : "s"}{" "}
-          <span className="muted">{timeAgo(props.commits[n - 1].time)}</span>
-        </div>
+        {!props.bare && (
+          <div className="commits-head">
+            <b className="agent">agent</b> added {n} commit{n === 1 ? "" : "s"}{" "}
+            <span className="muted">{timeAgo(props.commits[n - 1].time)}</span>
+          </div>
+        )}
         {props.commits.map((c) => {
           const i = all.indexOf(c);
           return (
