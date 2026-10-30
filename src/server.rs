@@ -170,7 +170,7 @@ async fn get_file(Path(id): Path<i64>, Query(q): Query<FileQuery>) -> ApiResult 
 }
 
 async fn list_comments(Path(id): Path<i64>) -> ApiResult {
-    Ok(Json(json!(db::list_comments(&db::open()?, id)?)))
+    Ok(Json(json!(db::list_all_comments(&db::open()?, id)?)))
 }
 
 async fn add_comment(Path(id): Path<i64>, Json(n): Json<db::NewComment>) -> ApiResult {

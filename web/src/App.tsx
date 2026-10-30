@@ -244,8 +244,8 @@ function PrPage({ id }: { id: number }) {
     await api.setState(id, state);
     await load();
   };
-  const submitReview = async (state: ReviewState, body: string) => {
-    await api.submitReview(id, state, body);
+  const submitReview = async (body: string) => {
+    await api.submitReview(id, "commented", body);
     await refreshComments();
     setReviewing(false);
   };
@@ -257,7 +257,7 @@ function PrPage({ id }: { id: number }) {
     await api.deleteComment(commentId);
     await refreshComments();
   };
-  const actions = { addComment, resolve, editComment, deleteComment };
+  const actions = { reviewing: comments.some((c) => c.pending), addComment, resolve, editComment, deleteComment };
   const editPr = async (changes: Parameters<typeof api.editPr>[1]) => {
     await api.editPr(id, changes);
     await load();
@@ -267,6 +267,7 @@ function PrPage({ id }: { id: number }) {
   if (!detail) return <div className="muted">Loading…</div>;
   const { pr } = detail;
   const roots = comments.filter((c) => c.parent_id === null);
+  const pendingCount = comments.filter((c) => c.pending).length;
   const switchTab = (t: Tab, r: CommitRange | null = range) => {
     setTab(t);
     if (t === "files") setRange(r);
@@ -308,9 +309,12 @@ function PrPage({ id }: { id: number }) {
         </button>
         <div className="tabs-actions">
           <button className="btn primary" onClick={() => setReviewing(!reviewing)}>
-            Review changes ▾
+            {pendingCount > 0 ? "Finish your review" : "Review changes"}
+            {pendingCount > 0 && <span className="count pending-count">{pendingCount}</span>} ▾
           </button>
-          {reviewing && <ReviewPanel onSubmit={submitReview} onCancel={() => setReviewing(false)} />}
+          {reviewing && (
+            <ReviewPanel pending={pendingCount} onSubmit={submitReview} onCancel={() => setReviewing(false)} />
+          )}
         </div>
       </nav>
       {tab === "conversation" ? (
@@ -366,6 +370,8 @@ function PrPage({ id }: { id: number }) {
 type LineSelection = { path: string; anchor: number; head: number; dragging: boolean };
 
 type Actions = {
+  /** Some comments are pending, so new ones join the review by default. */
+  reviewing: boolean;
   addComment: (c: NewComment) => Promise<void>;
   resolve: (id: number, resolved: boolean) => Promise<void>;
   editComment: (id: number, body: string) => Promise<void>;
@@ -949,7 +955,7 @@ function FileDiffTable(props: {
         composing: i === hi && !sel!.dragging,
         composeLabel: lo < hi ? `Commenting on ${hi - lo + 1} lines` : undefined,
         onCancel: () => setSel(null),
-        onSubmit: async (body) => {
+        onSubmit: async (body, pending) => {
           const start = f.lines[lo];
           const startSide: Side = start.kind === "del" ? "old" : "new";
           await actions.addComment({
@@ -962,6 +968,7 @@ function FileDiffTable(props: {
               .slice(lo, i + 1)
               .map((x) => x.text)
               .join("\n"),
+            pending,
           });
           setSel(null);
         },
@@ -1120,7 +1127,7 @@ type LineView = {
   onNumClick?: (shift: boolean) => void;
   onMouseEnter?: () => void;
   onCancel: () => void;
-  onSubmit: (body: string) => Promise<void>;
+  onSubmit: (body: string, pending: boolean) => Promise<void>;
 };
 
 function DiffRow(props: LineView & { comments: Comment[]; actions: Actions }) {
@@ -1190,8 +1197,10 @@ function LineThreads(props: { v: LineView; comments: Comment[]; actions: Actions
           <CommentForm
             autoFocus
             placeholder="Leave a comment"
-            submitLabel="Add comment"
-            onSubmit={v.onSubmit}
+            submitLabel="Add single comment"
+            onSubmit={(body) => v.onSubmit(body, false)}
+            reviewLabel={props.actions.reviewing ? "Add review comment" : "Start a review"}
+            onReview={(body) => v.onSubmit(body, true)}
             onCancel={v.onCancel}
           />
         </div>
@@ -1205,6 +1214,10 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
   const [replying, setReplying] = useState(false);
   useEffect(() => setOpen(!root.resolved), [root.resolved]);
   const replies = comments.filter((c) => c.parent_id === root.id);
+  const reply = (pending: boolean) => async (body: string) => {
+    await actions.addComment({ body, parent_id: root.id, pending });
+    setReplying(false);
+  };
 
   const lines = rangeLabel(root);
   return (
@@ -1227,19 +1240,21 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
               <CommentForm
                 autoFocus
                 placeholder="Reply…"
-                submitLabel="Reply"
+                // A pending thread is part of the review, so its replies are too.
+                submitLabel={root.pending ? undefined : "Add single comment"}
+                reviewLabel={actions.reviewing ? "Add review comment" : "Start a review"}
                 onCancel={() => setReplying(false)}
-                onSubmit={async (body) => {
-                  await actions.addComment({ body, parent_id: root.id });
-                  setReplying(false);
-                }}
+                onSubmit={reply(false)}
+                onReview={reply(true)}
               />
             ) : (
               <>
                 <input className="reply-stub" placeholder="Reply…" onFocus={() => setReplying(true)} readOnly />
-                <button className="btn" onClick={() => actions.resolve(root.id, !root.resolved)}>
-                  {root.resolved ? "Unresolve conversation" : "Resolve conversation"}
-                </button>
+                {!root.pending && (
+                  <button className="btn" onClick={() => actions.resolve(root.id, !root.resolved)}>
+                    {root.resolved ? "Unresolve conversation" : "Resolve conversation"}
+                  </button>
+                )}
               </>
             )}
           </div>
@@ -1267,6 +1282,11 @@ function CommentView(props: { comment: Comment; isRoot: boolean; replies: number
           {timeAgo(c.created_at)} · #{c.id}
           {c.updated_at !== null && <span title={new Date(c.updated_at * 1000).toLocaleString()}> · edited</span>}
         </span>
+        {c.pending && (
+          <span className="label pending" title="Not visible to the agent until you submit your review">
+            Pending
+          </span>
+        )}
         {/* The web UI is the "user"; agents' comments are read-only here, like others' comments on GitHub. */}
         {c.author === "user" && !editing && (
           <span className="comment-actions">
@@ -1302,7 +1322,11 @@ function CommentView(props: { comment: Comment; isRoot: boolean; replies: number
 
 function CommentForm(props: {
   placeholder: string;
-  submitLabel: string;
+  /** Label of the plain submit button; omit to only offer `onReview`. */
+  submitLabel?: string;
+  /** Adds the comment to the pending review instead; this becomes the primary button. */
+  reviewLabel?: string;
+  onReview?: (body: string) => Promise<void>;
   autoFocus?: boolean;
   initial?: string;
   /** Allow submitting an empty text (e.g. clearing a PR description). */
@@ -1319,12 +1343,12 @@ function CommentForm(props: {
   }, [props.initial]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const submit = async () => {
+  const submit = async (review = !!props.onReview) => {
     if (!body.trim() && !props.allowEmpty) return;
     setBusy(true);
     setErr("");
     try {
-      await props.onSubmit(body);
+      await (review ? props.onReview! : props.onSubmit)(body);
       setBody("");
     } catch (e) {
       setErr(String(e));
@@ -1352,9 +1376,20 @@ function CommentForm(props: {
             Cancel
           </button>
         )}
-        <button className="btn primary" disabled={busy || (!body.trim() && !props.allowEmpty)} onClick={submit}>
-          {props.submitLabel}
-        </button>
+        {props.submitLabel && (
+          <button
+            className={props.onReview ? "btn" : "btn primary"}
+            disabled={busy || (!body.trim() && !props.allowEmpty)}
+            onClick={() => submit(false)}
+          >
+            {props.submitLabel}
+          </button>
+        )}
+        {props.onReview && (
+          <button className="btn primary" disabled={busy || !body.trim()} onClick={() => submit(true)}>
+            {props.reviewLabel}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1385,8 +1420,7 @@ function ReviewItem({ review }: { review: Review }) {
   );
 }
 
-function ReviewPanel(props: { onSubmit: (state: ReviewState, body: string) => Promise<void>; onCancel: () => void }) {
-  const [state, setState] = useState<ReviewState>("commented");
+function ReviewPanel(props: { pending: number; onSubmit: (body: string) => Promise<void>; onCancel: () => void }) {
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -1394,18 +1428,13 @@ function ReviewPanel(props: { onSubmit: (state: ReviewState, body: string) => Pr
     setBusy(true);
     setErr("");
     try {
-      await props.onSubmit(state, body);
+      await props.onSubmit(body);
     } catch (e) {
       setErr(String(e));
     } finally {
       setBusy(false);
     }
   };
-  const options: [ReviewState, string, string][] = [
-    ["commented", "Comment", "Submit general feedback without explicit approval."],
-    ["approved", "Approve", "Give your approval to these changes."],
-    ["changes_requested", "Request changes", "Submit feedback the agent must address."],
-  ];
   return (
     <div className="review-panel box">
       <div className="box-header">
@@ -1413,21 +1442,17 @@ function ReviewPanel(props: { onSubmit: (state: ReviewState, body: string) => Pr
       </div>
       <div className="review-panel-body">
         <textarea autoFocus placeholder="Leave a summary (optional)" value={body} onChange={(e) => setBody(e.target.value)} />
-        {options.map(([value, label, hint]) => (
-          <label key={value} className="review-option">
-            <input type="radio" name="review-state" checked={state === value} onChange={() => setState(value)} />
-            <span>
-              <b>{label}</b>
-              <div className="muted small">{hint}</div>
-            </span>
-          </label>
-        ))}
+        <div className="muted small">
+          {props.pending > 0
+            ? `${props.pending} pending comment${props.pending === 1 ? "" : "s"} will be sent with your review.`
+            : "No pending comments. Use “Start a review” on a diff line to add some."}
+        </div>
         {err && <div className="error">{err}</div>}
         <div className="form-actions">
           <button className="btn" onClick={props.onCancel}>
             Cancel
           </button>
-          <button className="btn primary" disabled={busy || (state !== "approved" && !body.trim())} onClick={submit}>
+          <button className="btn primary" disabled={busy || (!props.pending && !body.trim())} onClick={submit}>
             Submit review
           </button>
         </div>

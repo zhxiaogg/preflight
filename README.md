@@ -35,7 +35,9 @@ Review in the browser like on GitHub:
   files **Viewed**.
 - **Comments**: `+` on a line to comment on either side; drag the `+` or shift-click line numbers to comment
   on several lines. Reply, resolve, and edit or delete your own comments. Markdown everywhere.
-- **Review changes**: Comment / Approve / Request changes.
+- **Reviews**: **Start a review** on a line to batch comments. They stay pending (hidden from the agent)
+  until you **Finish your review**, then go out together with an optional summary. **Add single comment**
+  posts right away.
 - **Commits**: click one to see just its changes, or check two (in the Conversation tab or the
   **Changes from** menu) to see everything between them; those views are read-only. A banner appears
   when the agent pushes new commits.
@@ -95,8 +97,8 @@ Don't resolve threads yourself unless asked; the reviewer resolves them.
 | GET | `/api/prs/:id/branches` | branches that can be picked as the base |
 | GET | `/api/prs/:id/diff` | raw unified diff (`?from=<oid>&to=<oid>` for a range of the PR's commits) |
 | GET | `/api/prs/:id/file` | file contents (`?path=…&rev=<oid>`), for expanding context |
-| GET/POST | `/api/prs/:id/comments` | list / add (`{body, parent_id?, path?, line?, side?, start_line?, start_side?, line_text?, author?}`) |
-| GET/POST | `/api/prs/:id/reviews` | list / submit (`{state: approved\|changes_requested\|commented, body}`) |
+| GET/POST | `/api/prs/:id/comments` | list / add (`{body, parent_id?, path?, line?, side?, start_line?, start_side?, line_text?, author?, pending?}`); `pending` holds it for the next review |
+| GET/POST | `/api/prs/:id/reviews` | list / submit (`{state: commented, body}`), publishing your pending comments with it |
 | POST | `/api/prs/:id/state` | `{state: open\|closed}` |
 | PATCH/DELETE | `/api/comments/:id` | edit (`{body}`) / delete your own (`user`) comment |
 | POST | `/api/comments/:id/resolve` | `{resolved: bool}` |
@@ -105,4 +107,4 @@ The server binds to `127.0.0.1` only.
 
 ## Not in the MVP
 
-Pending (batched) review comments, merging, uncommitted working-tree diffs.
+Merging, uncommitted working-tree diffs.

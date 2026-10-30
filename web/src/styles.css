@@ -21,6 +21,7 @@
   --del-num: #ffd7d5;
   --hunk-bg: #ddf4ff;
   --red: #cf222e;
+  --attention: #9a6700;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -38,6 +39,7 @@
     --del-num: rgba(248, 81, 73, 0.3);
     --hunk-bg: rgba(56, 139, 253, 0.1);
     --red: #f85149;
+    --attention: #d29922;
     --hl-keyword: #ff7b72;
     --hl-string: #a5d6ff;
     --hl-comment: #8b949e;
@@ -246,8 +248,8 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
   width: 100%; min-height: 100px; padding: 8px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--fg); font: inherit; resize: vertical;
 }
-.review-option { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; cursor: pointer; }
-.review-option input { margin-top: 4px; }
+.label.pending { border-color: var(--attention); color: var(--attention); }
+.btn.primary .pending-count { background: rgba(255, 255, 255, 0.25); color: #fff; }
 .review-event { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px 4px; }
 .review-icon {
   width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;

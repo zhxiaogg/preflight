@@ -209,9 +209,14 @@ fn diff_snippet(pr: &db::Pr, path: &str, side: &str, start: i64, end: i64) -> Re
     Ok(rows[lo..=hi].iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n"))
 }
 
+/// Loads a comment agents can see: the reviewer's pending comments don't exist for them yet.
+fn visible_comment(conn: &Connection, id: i64) -> Result<db::Comment> {
+    db::get_comment(conn, id)?.filter(|c| !c.pending).with_context(|| format!("comment #{id} not found"))
+}
+
 /// Loads a comment, refusing to change someone else's (e.g. the reviewer's).
 fn own_comment(conn: &Connection, id: i64, author: &str) -> Result<db::Comment> {
-    let c = db::get_comment(conn, id)?.with_context(|| format!("comment #{id} not found"))?;
+    let c = visible_comment(conn, id)?;
     anyhow::ensure!(c.author == author, "comment #{id} was written by {}, not {author}", c.author);
     Ok(c)
 }
@@ -514,6 +519,7 @@ fn main() -> Result<()> {
                 start_line: None,
                 start_side: None,
                 line_text: None,
+                pending: false,
             };
             if let (Some(path), Some(line)) = (file, line) {
                 n.line_text = Some(diff_snippet(&pr, &path, &side, start_line.unwrap_or(line), line)?);
@@ -534,7 +540,7 @@ fn main() -> Result<()> {
         }
         Cmd::Comment(CommentCmd::Reply { comment_id, body, author }) => {
             let conn = db::open()?;
-            let parent = db::get_comment(&conn, comment_id)?.context("comment not found")?;
+            let parent = visible_comment(&conn, comment_id)?;
             let root = parent.parent_id.unwrap_or(parent.id);
             let n = db::NewComment {
                 parent_id: Some(root),
@@ -546,6 +552,7 @@ fn main() -> Result<()> {
                 start_line: None,
                 start_side: None,
                 line_text: None,
+                pending: false,
             };
             let c = db::add_comment(&conn, parent.pr_id, &n)?;
             println!("Replied with comment #{}", c.id);
@@ -569,7 +576,7 @@ fn main() -> Result<()> {
         }
         Cmd::Comment(CommentCmd::Resolve { comment_id }) => {
             let conn = db::open()?;
-            db::get_comment(&conn, comment_id)?.context("comment not found")?;
+            visible_comment(&conn, comment_id)?;
             db::set_resolved(&conn, comment_id, true, "agent")?;
             println!("Resolved #{comment_id}");
             Ok(())

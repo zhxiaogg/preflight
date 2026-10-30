@@ -52,6 +52,8 @@ export type Comment = {
   resolved: boolean;
   created_at: number;
   updated_at: number | null;
+  /** Part of the reviewer's review in progress; agents see it once the review is submitted. */
+  pending: boolean;
 };
 
 export type NewComment = {
@@ -63,6 +65,7 @@ export type NewComment = {
   start_line?: number;
   start_side?: Side;
   line_text?: string;
+  pending?: boolean;
 };
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {

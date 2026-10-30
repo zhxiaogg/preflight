@@ -68,6 +68,8 @@ pub struct Comment {
     pub created_at: i64,
     /// Set when the body was edited.
     pub updated_at: Option<i64>,
+    /// Part of the reviewer's review in progress: only the web UI sees it until the review is submitted.
+    pub pending: bool,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +86,9 @@ pub struct NewComment {
     pub start_side: Option<String>,
     /// Snapshot of the commented line(s) so agents get context even if the diff moves.
     pub line_text: Option<String>,
+    /// Hold the comment back until the reviewer submits their review.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 fn default_author() -> String {
@@ -140,6 +145,7 @@ pub fn open() -> Result<Connection> {
         ("prs", "base_sha", "ALTER TABLE prs ADD COLUMN base_sha TEXT"),
         ("prs", "head_sha", "ALTER TABLE prs ADD COLUMN head_sha TEXT"),
         ("comments", "updated_at", "ALTER TABLE comments ADD COLUMN updated_at INTEGER"),
+        ("comments", "pending", "ALTER TABLE comments ADD COLUMN pending INTEGER NOT NULL DEFAULT 0"),
     ] {
         let exists = conn
             .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
@@ -171,7 +177,7 @@ fn now() -> i64 {
 const PR_COLS: &str = "id, repo, base, head, title, description, state, base_sha, head_sha, created_at";
 const REVIEW_COLS: &str = "id, pr_id, author, state, body, created_at";
 const COMMENT_COLS: &str = "id, pr_id, parent_id, author, body, path, line, side, start_line, start_side, \
-                            line_text, resolved, created_at, updated_at";
+                            line_text, resolved, created_at, updated_at, pending";
 
 fn pr_row(r: &Row) -> rusqlite::Result<Pr> {
     Ok(Pr {
@@ -215,6 +221,7 @@ fn comment_row(r: &Row) -> rusqlite::Result<Comment> {
         resolved: r.get(11)?,
         created_at: r.get(12)?,
         updated_at: r.get(13)?,
+        pending: r.get(14)?,
     })
 }
 
@@ -315,7 +322,13 @@ pub fn list_prs(c: &Connection) -> Result<Vec<Pr>> {
     Ok(rows)
 }
 
+/// The PR's comments, without the reviewer's pending ones (what agents see).
 pub fn list_comments(c: &Connection, pr_id: i64) -> Result<Vec<Comment>> {
+    Ok(list_all_comments(c, pr_id)?.into_iter().filter(|c| !c.pending).collect())
+}
+
+/// The PR's comments including pending ones, for the reviewer's web UI.
+pub fn list_all_comments(c: &Connection, pr_id: i64) -> Result<Vec<Comment>> {
     let mut st = c.prepare(&format!("SELECT {COMMENT_COLS} FROM comments WHERE pr_id = ?1 ORDER BY id"))?;
     let rows = st.query_map([pr_id], comment_row)?.collect::<rusqlite::Result<_>>()?;
     Ok(rows)
@@ -327,12 +340,14 @@ pub fn get_comment(c: &Connection, id: i64) -> Result<Option<Comment>> {
 }
 
 pub fn add_comment(c: &Connection, pr_id: i64, n: &NewComment) -> Result<Comment> {
-    // Replies inherit the anchor of the thread root.
+    // Replies inherit the anchor of the thread root; replies to a pending thread are pending too.
+    let mut pending = n.pending;
     let (path, line, side, start_line, start_side, line_text) = match n.parent_id {
         Some(pid) => {
             let parent = get_comment(c, pid)?.context("parent comment not found")?;
             anyhow::ensure!(parent.pr_id == pr_id, "parent comment belongs to another PR");
             anyhow::ensure!(parent.parent_id.is_none(), "can only reply to a thread root");
+            pending |= parent.pending;
             (parent.path, parent.line, parent.side, parent.start_line, parent.start_side, parent.line_text)
         }
         None => (
@@ -346,12 +361,15 @@ pub fn add_comment(c: &Connection, pr_id: i64, n: &NewComment) -> Result<Comment
     };
     c.execute(
         "INSERT INTO comments
-           (pr_id, parent_id, author, body, path, line, side, start_line, start_side, line_text, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![pr_id, n.parent_id, n.author, n.body, path, line, side, start_line, start_side, line_text, now()],
+           (pr_id, parent_id, author, body, path, line, side, start_line, start_side, line_text, created_at, pending)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![pr_id, n.parent_id, n.author, n.body, path, line, side, start_line, start_side, line_text, now(), pending],
     )?;
     let comment = get_comment(c, c.last_insert_rowid())?.context("comment vanished after insert")?;
-    log_event(c, pr_id, "comment_added", &comment.author, Some(comment.id), serde_json::json!({ "comment": comment }))?;
+    // Pending comments are logged when their review is submitted.
+    if !pending {
+        log_event(c, pr_id, "comment_added", &comment.author, Some(comment.id), serde_json::json!({ "comment": comment }))?;
+    }
     Ok(comment)
 }
 
@@ -359,6 +377,9 @@ pub fn edit_comment(c: &Connection, id: i64, body: &str) -> Result<()> {
     let old = get_comment(c, id)?.context("comment not found")?;
     c.execute("UPDATE comments SET body = ?1, updated_at = ?2 WHERE id = ?3", params![body, now(), id])?;
     let comment = get_comment(c, id)?.context("comment vanished after update")?;
+    if old.pending {
+        return Ok(());
+    }
     let data = serde_json::json!({ "old_body": old.body, "comment": comment });
     log_event(c, old.pr_id, "comment_edited", &old.author, Some(id), data)
 }
@@ -366,32 +387,57 @@ pub fn edit_comment(c: &Connection, id: i64, body: &str) -> Result<()> {
 /// Deletes a comment; deleting a thread root deletes its replies too.
 pub fn delete_comment(c: &Connection, id: i64, actor: &str) -> Result<()> {
     let comment = get_comment(c, id)?.context("comment not found")?;
+    // Pending replies were never seen by agents, so they aren't reported as deleted.
     let replies: Vec<_> = list_comments(c, comment.pr_id)?
         .into_iter()
         .filter(|r| r.parent_id == Some(id))
         .collect();
     c.execute("DELETE FROM comments WHERE parent_id = ?1", [id])?;
     c.execute("DELETE FROM comments WHERE id = ?1", [id])?;
+    if comment.pending {
+        return Ok(());
+    }
     let data = serde_json::json!({ "comment": comment, "deleted_replies": replies });
     log_event(c, comment.pr_id, "comment_deleted", actor, Some(id), data)
 }
 
 pub fn set_resolved(c: &Connection, id: i64, resolved: bool, actor: &str) -> Result<()> {
     let comment = get_comment(c, id)?.context("comment not found")?;
+    anyhow::ensure!(!comment.pending, "submit the review before resolving its comments");
     c.execute("UPDATE comments SET resolved = ?1 WHERE id = ?2", params![resolved, id])?;
     let kind = if resolved { "comment_resolved" } else { "comment_unresolved" };
     log_event(c, comment.pr_id, kind, actor, Some(id), serde_json::json!({ "comment": comment }))
 }
 
+/// Submits a review, publishing the author's pending comments with it in one transaction, so an
+/// agent waiting on the review sees all of its comments at once.
 pub fn add_review(c: &Connection, pr_id: i64, author: &str, state: &str, body: &str) -> Result<Review> {
     anyhow::ensure!(REVIEW_STATES.contains(&state), "state must be one of {REVIEW_STATES:?}");
-    c.execute(
+    let tx = c.unchecked_transaction()?;
+    let pending: Vec<_> = list_all_comments(&tx, pr_id)?
+        .into_iter()
+        .filter(|c| c.pending && c.author == author)
+        .collect();
+    anyhow::ensure!(
+        !body.trim().is_empty() || !pending.is_empty() || state == "approved",
+        "add a summary or some comments before submitting the review"
+    );
+    let at = now();
+    for p in &pending {
+        tx.execute("UPDATE comments SET pending = 0, created_at = ?1 WHERE id = ?2", params![at, p.id])?;
+        let comment = get_comment(&tx, p.id)?.context("comment vanished")?;
+        log_event(&tx, pr_id, "comment_added", author, Some(p.id), serde_json::json!({ "comment": comment }))?;
+    }
+    tx.execute(
         "INSERT INTO reviews (pr_id, author, state, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![pr_id, author, state, body, now()],
+        params![pr_id, author, state, body, at],
     )?;
-    let id = c.last_insert_rowid();
-    let review = c.query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?1"), [id], review_row)?;
-    log_event(c, pr_id, "review_submitted", author, None, serde_json::json!({ "review": review }))?;
+    let id = tx.last_insert_rowid();
+    let review = tx.query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?1"), [id], review_row)?;
+    let comment_ids: Vec<_> = pending.iter().map(|p| p.id).collect();
+    let data = serde_json::json!({ "review": review, "comment_ids": comment_ids });
+    log_event(&tx, pr_id, "review_submitted", author, None, data)?;
+    tx.commit()?;
     Ok(review)
 }
 
