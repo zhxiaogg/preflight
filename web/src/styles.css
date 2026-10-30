@@ -69,6 +69,8 @@ code, pre, .code, .num, .branch {
 .topbar .topbar-link { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; opacity: 0.85; }
 .topbar .topbar-link:hover { opacity: 1; text-decoration: none; }
 .container { max-width: 1280px; margin: 0 auto; padding: 24px 16px; }
+/* Like GitHub, diffs get the full window width; the conversation keeps a readable width. */
+.container:has(.files-layout) { max-width: none; padding-left: 24px; padding-right: 24px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 .error { color: var(--red); padding: 8px 0; }
