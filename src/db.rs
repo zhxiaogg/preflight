@@ -70,6 +70,8 @@ pub struct Comment {
     pub updated_at: Option<i64>,
     /// Part of the reviewer's review in progress: only the web UI sees it until the review is submitted.
     pub pending: bool,
+    /// The review that published this comment, if it was part of one.
+    pub review_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +148,7 @@ pub fn open() -> Result<Connection> {
         ("prs", "head_sha", "ALTER TABLE prs ADD COLUMN head_sha TEXT"),
         ("comments", "updated_at", "ALTER TABLE comments ADD COLUMN updated_at INTEGER"),
         ("comments", "pending", "ALTER TABLE comments ADD COLUMN pending INTEGER NOT NULL DEFAULT 0"),
+        ("comments", "review_id", "ALTER TABLE comments ADD COLUMN review_id INTEGER REFERENCES reviews(id)"),
     ] {
         let exists = conn
             .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
@@ -177,7 +180,7 @@ fn now() -> i64 {
 const PR_COLS: &str = "id, repo, base, head, title, description, state, base_sha, head_sha, created_at";
 const REVIEW_COLS: &str = "id, pr_id, author, state, body, created_at";
 const COMMENT_COLS: &str = "id, pr_id, parent_id, author, body, path, line, side, start_line, start_side, \
-                            line_text, resolved, created_at, updated_at, pending";
+                            line_text, resolved, created_at, updated_at, pending, review_id";
 
 fn pr_row(r: &Row) -> rusqlite::Result<Pr> {
     Ok(Pr {
@@ -222,6 +225,7 @@ fn comment_row(r: &Row) -> rusqlite::Result<Comment> {
         created_at: r.get(12)?,
         updated_at: r.get(13)?,
         pending: r.get(14)?,
+        review_id: r.get(15)?,
     })
 }
 
@@ -423,16 +427,19 @@ pub fn add_review(c: &Connection, pr_id: i64, author: &str, state: &str, body: &
         "add a summary or some comments before submitting the review"
     );
     let at = now();
-    for p in &pending {
-        tx.execute("UPDATE comments SET pending = 0, created_at = ?1 WHERE id = ?2", params![at, p.id])?;
-        let comment = get_comment(&tx, p.id)?.context("comment vanished")?;
-        log_event(&tx, pr_id, "comment_added", author, Some(p.id), serde_json::json!({ "comment": comment }))?;
-    }
     tx.execute(
         "INSERT INTO reviews (pr_id, author, state, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![pr_id, author, state, body, at],
     )?;
     let id = tx.last_insert_rowid();
+    for p in &pending {
+        tx.execute(
+            "UPDATE comments SET pending = 0, created_at = ?1, review_id = ?2 WHERE id = ?3",
+            params![at, id, p.id],
+        )?;
+        let comment = get_comment(&tx, p.id)?.context("comment vanished")?;
+        log_event(&tx, pr_id, "comment_added", author, Some(p.id), serde_json::json!({ "comment": comment }))?;
+    }
     let review = tx.query_row(&format!("SELECT {REVIEW_COLS} FROM reviews WHERE id = ?1"), [id], review_row)?;
     let comment_ids: Vec<_> = pending.iter().map(|p| p.id).collect();
     let data = serde_json::json!({ "review": review, "comment_ids": comment_ids });

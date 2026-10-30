@@ -106,14 +106,46 @@ code, pre, .code, .num, .branch {
 .count { background: var(--bg-subtle); border-radius: 2em; padding: 0 6px; font-size: 12px; margin-left: 4px; }
 
 .conversation { max-width: 920px; }
-.timeline-item { margin-bottom: 16px; }
 .comment-body { padding: 12px 16px; word-break: break-word; }
-.commits { padding-left: 16px; border-left: 2px solid var(--border); }
-.commit { padding: 2px 0; }
-.thread-file { padding: 0 0 6px; }
-.snippet { margin: 6px 0 0; padding: 6px 10px; background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; }
+
+/* Conversation timeline: a vertical line through a badge per entry, like GitHub. */
+.timeline { position: relative; }
+.timeline::before { content: ""; position: absolute; left: 15px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+.tl-item { position: relative; display: flex; gap: 12px; align-items: flex-start; margin-bottom: 16px; }
+.tl-badge {
+  flex: none; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-subtle); color: var(--muted); border: 1px solid var(--border); box-shadow: 0 0 0 3px var(--bg);
+}
+.tl-badge.green { background: var(--green); border-color: var(--green); color: #fff; }
+.tl-badge.red { background: var(--red); border-color: var(--red); color: #fff; }
+.tl-content { flex: 1; min-width: 0; }
+.tl-event .tl-content { padding-top: 6px; }
+.tl-content .agent { color: #8250df; }
+.tl-footer { margin-left: 44px; padding-top: 8px; border-top: 2px solid var(--border); }
+.commits-head { margin-bottom: 4px; }
+.review-head { padding: 6px 0 8px; }
+.review-threads { display: flex; flex-direction: column; }
+.review-threads .thread { margin: 8px 0 0; }
+
+/* Thread header (file and lines) and the commented code on the Conversation tab. */
+.thread-head { display: flex; align-items: center; gap: 4px; padding: 8px 16px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); font-size: 13px; }
+.thread-head a { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-head.toggle { cursor: pointer; }
+.thread.resolved .thread-head { border-bottom: none; }
+.thread.resolved .thread-head + * { border-top: 1px solid var(--border); }
+.thread-head-state { margin-left: auto; white-space: nowrap; }
+.snippet { border-bottom: 1px solid var(--border); overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.snippet table { border-collapse: collapse; width: 100%; }
+.snippet td { padding: 0 10px; line-height: 20px; white-space: pre; }
+.snippet td.num { width: 1%; text-align: right; color: var(--muted); user-select: none; }
+.snippet-more {
+  display: block; width: 100%; padding: 2px 10px; border: none; border-bottom: 1px solid var(--border);
+  background: var(--hunk-bg); color: var(--muted); font: inherit; text-align: left; cursor: pointer;
+}
+.snippet-more:hover { color: var(--accent); }
 
 .thread { margin: 8px 0; max-width: 900px; }
+.tl-content > .thread { margin: 0; }
 .thread .comment + .comment { border-top: 1px solid var(--border); }
 .comment-head { padding: 8px 16px 0; }
 .comment-head .agent { color: #8250df; }
@@ -250,13 +282,6 @@ table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
 }
 .label.pending { border-color: var(--attention); color: var(--attention); }
 .btn.primary .pending-count { background: rgba(255, 255, 255, 0.25); color: #fff; }
-.review-event { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px 4px; }
-.review-icon {
-  width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
-  background: var(--bg-subtle); border: 1px solid var(--border); font-size: 13px; font-weight: 700;
-}
-.review-event.approved .review-icon { background: var(--green); color: #fff; border-color: var(--green); }
-.review-event.changes .review-icon { background: var(--red); color: #fff; border-color: var(--red); }
 
 /* Viewed files. */
 .viewed-count { margin-left: 12px; }

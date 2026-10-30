@@ -38,6 +38,9 @@ Review in the browser like on GitHub:
 - **Reviews**: **Start a review** on a line to batch comments. They stay pending (hidden from the agent)
   until you **Finish your review**, then go out together with an optional summary. **Add single comment**
   posts right away.
+- **Conversation**: a timeline of commits, comments, reviews (holding the comments they sent) and
+  close/reopen/title/base changes. Threads show the last lines of the commented code; resolved ones
+  collapse to a single line.
 - **Commits**: click one to see just its changes, or check two (in the Conversation tab or the
   **Changes from** menu) to see everything between them; those views are read-only. A banner appears
   when the agent pushes new commits.

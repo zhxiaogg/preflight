@@ -105,7 +105,16 @@ async fn get_pr(Path(id): Path<i64>) -> ApiResult {
     let refs = resolve(&pr)?;
     let commits: Vec<Value> = git::commits(&pr.repo, &refs.base, &refs.head)?
         .into_iter()
-        .map(|c| json!({ "oid": c.oid, "sha": c.short, "subject": c.subject }))
+        .map(|c| json!({ "oid": c.oid, "sha": c.short, "subject": c.subject, "time": c.time }))
+        .collect();
+    // Closing, reopening and renaming show up in the conversation timeline.
+    let activity: Vec<_> = db::list_events(&db::open()?, id, 0)?
+        .into_iter()
+        .filter(|e| match e.kind.as_str() {
+            "pr_closed" | "pr_reopened" => true,
+            "pr_edited" => e.data.get("title").is_some() || e.data.get("base").is_some(),
+            _ => false,
+        })
         .collect();
     Ok(Json(json!({
         "pr": pr,
@@ -114,6 +123,7 @@ async fn get_pr(Path(id): Path<i64>) -> ApiResult {
         "base_missing": refs.base_missing,
         "head_missing": refs.head_missing,
         "commits": commits,
+        "activity": activity,
     })))
 }
 

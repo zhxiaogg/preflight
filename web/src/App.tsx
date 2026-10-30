@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, Comment, CommitRange, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
+import { Activity, api, Comment, CommitRange, NewComment, Pr, PrDetail, Review, ReviewState, Side } from "./api";
 import { DiffLine, FileDiff, filePath, parseDiff } from "./diff";
 import { highlightFile, highlightText } from "./highlight";
 import { Markdown } from "./Markdown";
@@ -324,7 +324,10 @@ function PrPage({ id }: { id: number }) {
           comments={comments}
           reviews={reviews}
           actions={actions}
-          onOpenFiles={() => switchTab("files", null)}
+          onOpenFile={(path) => {
+            switchTab("files", null);
+            requestAnimationFrame(() => document.getElementById(fileAnchor(path))?.scrollIntoView({ block: "start" }));
+          }}
           onOpenCommits={(r) => switchTab("files", r)}
           onSetState={setState}
           onEditDescription={(description) => editPr({ description })}
@@ -413,90 +416,146 @@ function rangeLabel(c: Comment) {
   return `${sign(c.start_side)}${c.start_line} to ${sign(c.side)}${c.line}`;
 }
 
+type Commit = PrDetail["commits"][number];
+
+/** One entry of the conversation timeline, in time order. */
+type Entry =
+  | { kind: "commits"; at: number; commits: Commit[] }
+  | { kind: "thread"; at: number; root: Comment }
+  | { kind: "review"; at: number; review: Review }
+  | { kind: "activity"; at: number; event: Activity };
+
+function buildTimeline(detail: PrDetail, roots: Comment[], reviews: Review[]): Entry[] {
+  const items: Entry[] = [
+    ...detail.commits.map((c): Entry => ({ kind: "commits", at: c.time, commits: [c] })),
+    // Threads published by a review are shown under that review.
+    ...roots.filter((c) => c.review_id === null).map((c): Entry => ({ kind: "thread", at: c.created_at, root: c })),
+    ...reviews.map((r): Entry => ({ kind: "review", at: r.created_at, review: r })),
+    ...detail.activity.map((e): Entry => ({ kind: "activity", at: e.created_at, event: e })),
+  ].sort((a, b) => a.at - b.at);
+  // Consecutive commits form one "added N commits" group, like GitHub.
+  const out: Entry[] = [];
+  for (const item of items) {
+    const last = out[out.length - 1];
+    if (item.kind === "commits" && last?.kind === "commits") last.commits.push(...item.commits);
+    else out.push(item.kind === "commits" ? { ...item, commits: [...item.commits] } : item);
+  }
+  return out;
+}
+
+/** The CLI acts for the agent. */
+function actorName(actor: string) {
+  return actor === "cli" ? "agent" : actor;
+}
+
 function Conversation(props: {
   detail: PrDetail;
   files: FileDiff[];
   comments: Comment[];
   reviews: Review[];
   actions: Actions;
-  onOpenFiles: () => void;
+  onOpenFile: (path: string) => void;
   onOpenCommits: (r: CommitRange) => void;
   onSetState: (state: Pr["state"]) => Promise<void>;
   onEditDescription: (description: string) => Promise<void>;
 }) {
   const [editingDescription, setEditingDescription] = useState(false);
+  // Commits checked for comparing, across all commit groups.
+  const [endpoints, setEndpoints] = useState<string[]>([]);
   const { detail, files, comments, actions } = props;
   // Inline threads whose line no longer exists in the current diff are "outdated".
   const texts = useMemo(() => lineTexts(files), [files]);
   const roots = comments.filter((c) => c.parent_id === null);
-  type Item = { at: number; thread?: Comment; review?: Review };
-  const timeline: Item[] = [
-    ...roots.map((c) => ({ at: c.created_at, thread: c })),
-    ...props.reviews.map((r) => ({ at: r.created_at, review: r })),
-  ].sort((a, b) => a.at - b.at);
+  const timeline = buildTimeline(detail, roots, props.reviews);
+  const selection = rangeFromEndpoints(detail.commits, endpoints);
+  const lastGroup = timeline.filter((e) => e.kind === "commits").pop();
+  const thread = (r: Comment) => (
+    <ConversationThread
+      key={r.id}
+      root={r}
+      comments={comments}
+      actions={actions}
+      outdated={isOutdated(r, texts)}
+      onOpenFile={props.onOpenFile}
+    />
+  );
 
   return (
     <div className="conversation">
-      <div className="timeline-item box">
-        <div className="box-header">
-          <b>agent</b> <span className="muted">opened this PR {timeAgo(detail.pr.created_at)}</span>
-          {!editingDescription && (
-            <button className="link-btn header-action" onClick={() => setEditingDescription(true)}>
-              Edit
-            </button>
-          )}
-        </div>
-        <div className="comment-body">
-          {editingDescription ? (
-            <CommentForm
-              autoFocus
-              allowEmpty
-              initial={detail.pr.description}
-              placeholder="Describe the changes (markdown)"
-              submitLabel="Update description"
-              onCancel={() => setEditingDescription(false)}
-              onSubmit={async (body) => {
-                await props.onEditDescription(body);
-                setEditingDescription(false);
-              }}
-            />
-          ) : detail.pr.description ? (
-            <Markdown text={detail.pr.description} />
-          ) : (
-            <span className="muted">No description provided.</span>
-          )}
-        </div>
-      </div>
-      {detail.commits.length > 0 && (
-        <CommitList prId={detail.pr.id} commits={detail.commits} onOpen={props.onOpenCommits} />
-      )}
-      {timeline.map((item) => {
-        if (item.review) return <ReviewItem key={`r${item.review.id}`} review={item.review} />;
-        const r = item.thread!;
-        const outdated = isOutdated(r, texts);
-        return (
-          <div key={r.id} className="timeline-item">
-            {r.path && (
-              <div className="thread-file">
-                <a
-                  href={routeUrl(detail.pr.id, "files", null)}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    props.onOpenFiles();
+      <div className="timeline">
+        <div className="tl-item">
+          <Badge icon="comment" />
+          <div className="tl-content box">
+            <div className="box-header">
+              <b className="agent">agent</b> <span className="muted">opened this PR {timeAgo(detail.pr.created_at)}</span>
+              {!editingDescription && (
+                <button className="link-btn header-action" onClick={() => setEditingDescription(true)}>
+                  Edit
+                </button>
+              )}
+            </div>
+            <div className="comment-body">
+              {editingDescription ? (
+                <CommentForm
+                  autoFocus
+                  allowEmpty
+                  initial={detail.pr.description}
+                  placeholder="Describe the changes (markdown)"
+                  submitLabel="Update description"
+                  onCancel={() => setEditingDescription(false)}
+                  onSubmit={async (body) => {
+                    await props.onEditDescription(body);
+                    setEditingDescription(false);
                   }}
-                >
-                  {r.path}
-                  {r.line !== null && `:${r.start_line !== null ? `${r.start_line}-` : ""}${r.line}`}
-                </a>
-                {outdated && <span className="label">Outdated</span>}
-                {r.line_text !== null && <pre className="snippet">{r.line_text}</pre>}
-              </div>
-            )}
-            <Thread root={r} comments={comments} actions={actions} />
+                />
+              ) : detail.pr.description ? (
+                <Markdown text={detail.pr.description} />
+              ) : (
+                <span className="muted">No description provided.</span>
+              )}
+            </div>
           </div>
-        );
-      })}
-      <div className="timeline-item">
+        </div>
+        {timeline.map((e) => {
+          if (e.kind === "commits")
+            return (
+              <CommitGroup
+                key={`c${e.commits[0].oid}`}
+                prId={detail.pr.id}
+                all={detail.commits}
+                commits={e.commits}
+                endpoints={endpoints}
+                onEndpoints={setEndpoints}
+                // The compare button sits under the group holding the newest checked commit.
+                showCompare={
+                  selection ? e.commits.some((c) => c.oid === selection.to) : e === lastGroup && detail.commits.length > 1
+                }
+                onOpen={props.onOpenCommits}
+              />
+            );
+          if (e.kind === "thread")
+            return (
+              <div key={`t${e.root.id}`} className="tl-item">
+                <Badge icon="comment" />
+                <div className="tl-content">{thread(e.root)}</div>
+              </div>
+            );
+          if (e.kind === "review") {
+            const reviewRoots = roots.filter((c) => c.review_id === e.review.id);
+            // Replies this review added to threads started elsewhere.
+            const replies = comments.filter(
+              (c) => c.parent_id !== null && c.review_id === e.review.id && !reviewRoots.some((r) => r.id === c.parent_id),
+            ).length;
+            return (
+              <ReviewItem key={`r${e.review.id}`} review={e.review} replies={replies}>
+                {reviewRoots.map(thread)}
+              </ReviewItem>
+            );
+          }
+          return <ActivityItem key={`a${e.event.id}`} event={e.event} />;
+        })}
+      </div>
+      <div className="tl-footer">
         <CommentForm placeholder="Leave a comment" submitLabel="Comment" onSubmit={(body) => actions.addComment({ body })} />
         <div className="form-actions">
           {detail.pr.state === "open" ? (
@@ -511,6 +570,222 @@ function Conversation(props: {
         </div>
       </div>
     </div>
+  );
+}
+
+type IconName = "comment" | "commit" | "review" | "closed" | "reopened" | "edit";
+
+/** Small line icons for the timeline (16px, drawn in the current text color). */
+function Icon({ name }: { name: IconName }) {
+  const paths: Record<IconName, JSX.Element> = {
+    comment: <path d="M2.5 3h11v7.5H7.5L4.5 13v-2.5h-2z" />,
+    commit: (
+      <>
+        <circle cx="8" cy="8" r="2.75" />
+        <path d="M1 8h4.25M10.75 8H15" />
+      </>
+    ),
+    review: (
+      <>
+        <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />
+        <circle cx="8" cy="8" r="2" />
+      </>
+    ),
+    closed: (
+      <>
+        <circle cx="8" cy="8" r="5.75" />
+        <path d="M4 12L12 4" />
+      </>
+    ),
+    reopened: (
+      <>
+        <circle cx="8" cy="8" r="5.75" />
+        <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+      </>
+    ),
+    edit: <path d="M3 13l.75-3L10.5 3.25l2.25 2.25L6 12.25z" />,
+  };
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      {paths[name]}
+    </svg>
+  );
+}
+
+function Badge({ icon, tone }: { icon: IconName; tone?: "green" | "red" }) {
+  return (
+    <div className={`tl-badge ${tone ?? ""}`}>
+      <Icon name={icon} />
+    </div>
+  );
+}
+
+function ActivityItem({ event: e }: { event: Activity }) {
+  const who = <b>{actorName(e.actor)}</b>;
+  const when = <span className="muted">{timeAgo(e.created_at)}</span>;
+  if (e.kind !== "pr_edited") {
+    const closed = e.kind === "pr_closed";
+    return (
+      <div className="tl-item tl-event">
+        <Badge icon={closed ? "closed" : "reopened"} tone={closed ? "red" : "green"} />
+        <div className="tl-content">
+          {who} {closed ? "closed" : "reopened"} this {when}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <>
+      {e.data.title && (
+        <div className="tl-item tl-event">
+          <Badge icon="edit" />
+          <div className="tl-content">
+            {who} changed the title <del className="muted">{e.data.title.old}</del> <b>{e.data.title.new}</b> {when}
+          </div>
+        </div>
+      )}
+      {e.data.base && (
+        <div className="tl-item tl-event">
+          <Badge icon="edit" />
+          <div className="tl-content">
+            {who} changed the base branch from <span className="branch">{e.data.base.old}</span> to{" "}
+            <span className="branch">{e.data.base.new}</span> {when}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Consecutive commits in the timeline: click one to view it, or check two (in any group) to compare. */
+function CommitGroup(props: {
+  prId: number;
+  /** All of the PR's commits, newest first, for working out the compared range. */
+  all: Commit[];
+  /** This group's commits, oldest first. */
+  commits: Commit[];
+  endpoints: string[];
+  onEndpoints: (e: string[]) => void;
+  showCompare: boolean;
+  onOpen: (r: CommitRange) => void;
+}) {
+  const { all, endpoints } = props;
+  const selection = rangeFromEndpoints(all, endpoints);
+  const [lo, hi] = coveredBy(all, selection);
+  const count = selection ? hi - lo + 1 : 0;
+  const n = props.commits.length;
+  return (
+    <div className="tl-item tl-event commits">
+      <Badge icon="commit" />
+      <div className="tl-content">
+        <div className="commits-head">
+          <b className="agent">agent</b> added {n} commit{n === 1 ? "" : "s"}{" "}
+          <span className="muted">{timeAgo(props.commits[n - 1].time)}</span>
+        </div>
+        {props.commits.map((c) => {
+          const i = all.indexOf(c);
+          return (
+            <CommitRow
+              key={c.oid}
+              prId={props.prId}
+              commit={c}
+              checked={endpoints.includes(c.oid)}
+              included={i >= lo && i <= hi}
+              disabled={endpoints.length === 2 && !endpoints.includes(c.oid)}
+              onToggle={() => props.onEndpoints(toggleEndpoint(endpoints, c.oid) ?? endpoints)}
+              onOpen={() => props.onOpen({ from: c.oid, to: c.oid })}
+            />
+          );
+        })}
+        {props.showCompare && (
+          <div className="commit-compare muted small">
+            {selection ? (
+              <button className="btn" onClick={() => props.onOpen(selection)}>
+                View changes in {count} commit{count === 1 ? "" : "s"}
+              </button>
+            ) : (
+              "Check two commits to compare all changes between them."
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Lines of the commented code shown above a thread; longer selections expand on demand. */
+const SNIPPET_LINES = 4;
+
+function Snippet({ c }: { c: Comment }) {
+  const [full, setFull] = useState(false);
+  const html = useMemo(
+    () => (c.path && c.line_text !== null ? highlightText(c.path, c.line_text) : null),
+    [c.path, c.line_text],
+  );
+  if (c.line_text === null || c.line === null) return null;
+  const lines = c.line_text.split("\n");
+  // Number the lines only when they're one side's consecutive lines; a selection mixing deleted and
+  // added lines has no single numbering.
+  const first = c.start_line ?? c.line;
+  const numbered = (c.start_side ?? c.side) === c.side && c.line - first + 1 === lines.length;
+  const hidden = full ? 0 : Math.max(0, lines.length - SNIPPET_LINES);
+  return (
+    <div className="snippet">
+      {hidden > 0 && (
+        <button className="snippet-more" onClick={() => setFull(true)}>
+          Show {hidden} more line{hidden === 1 ? "" : "s"}
+        </button>
+      )}
+      <table>
+        <tbody>
+          {lines.slice(hidden).map((text, i) => (
+            <tr key={i}>
+              {numbered && <td className="num">{first + hidden + i}</td>}
+              <td className="code">
+                {html?.[hidden + i] !== undefined ? <span dangerouslySetInnerHTML={{ __html: html[hidden + i] }} /> : text}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** An inline thread on the Conversation tab: file and lines on top, the commented code, then the comments. */
+function ConversationThread(props: {
+  root: Comment;
+  comments: Comment[];
+  actions: Actions;
+  outdated: boolean;
+  onOpenFile: (path: string) => void;
+}) {
+  const { root: r } = props;
+  if (!r.path) return <Thread root={r} comments={props.comments} actions={props.actions} />;
+  const lines = r.line === null ? "" : `:${r.start_line !== null ? `${r.start_line}-` : ""}${r.line}`;
+  return (
+    <Thread
+      root={r}
+      comments={props.comments}
+      actions={props.actions}
+      head={
+        <>
+          <a
+            href={`#${fileAnchor(r.path)}`}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              props.onOpenFile(r.path!);
+            }}
+          >
+            {r.path}
+            {lines}
+          </a>
+          {props.outdated && <span className="label">Outdated</span>}
+        </>
+      }
+      snippet={<Snippet c={r} />}
+    />
   );
 }
 
@@ -1209,7 +1484,15 @@ function LineThreads(props: { v: LineView; comments: Comment[]; actions: Actions
   );
 }
 
-function Thread({ root, comments, actions }: { root: Comment; comments: Comment[]; actions: Actions }) {
+function Thread(props: {
+  root: Comment;
+  comments: Comment[];
+  actions: Actions;
+  /** File and line header (Conversation tab); a resolved thread collapses to just this line. */
+  head?: JSX.Element;
+  snippet?: JSX.Element;
+}) {
+  const { root, comments, actions } = props;
   const [open, setOpen] = useState(!root.resolved);
   const [replying, setReplying] = useState(false);
   useEffect(() => setOpen(!root.resolved), [root.resolved]);
@@ -1220,10 +1503,25 @@ function Thread({ root, comments, actions }: { root: Comment; comments: Comment[
   };
 
   const lines = rangeLabel(root);
+  const count = 1 + replies.length;
   return (
     <div className={`box thread ${root.resolved ? "resolved" : ""}`}>
-      {lines && <div className="thread-lines muted small">Comment on lines {lines}</div>}
-      {root.resolved && (
+      {props.head && (
+        <div
+          className={`thread-head ${root.resolved ? "toggle" : ""}`}
+          onClick={() => root.resolved && setOpen(!open)}
+        >
+          {props.head}
+          {root.resolved && (
+            <span className="thread-head-state muted small">
+              Resolved · {count} comment{count === 1 ? "" : "s"} {open ? "▾" : "▸"}
+            </span>
+          )}
+        </div>
+      )}
+      {open && props.snippet}
+      {!props.head && lines && <div className="thread-lines muted small">Comment on lines {lines}</div>}
+      {!props.head && root.resolved && (
         <div className="thread-resolved-bar" onClick={() => setOpen(!open)}>
           <span className="muted small">
             {open ? "▾" : "▸"} Resolved conversation ({1 + replies.length})
@@ -1401,21 +1699,32 @@ const REVIEW_TEXT: Record<ReviewState, [string, string]> = {
   commented: ["reviewed", "commented"],
 };
 
-function ReviewItem({ review }: { review: Review }) {
+function ReviewItem(props: { review: Review; replies: number; children?: JSX.Element[] }) {
+  const { review } = props;
   const [text, cls] = REVIEW_TEXT[review.state];
+  const tone = review.state === "approved" ? "green" : review.state === "changes_requested" ? "red" : undefined;
+  const threads = props.children?.length ?? 0;
+  const counts = [
+    threads > 0 && `${threads} comment${threads === 1 ? "" : "s"}`,
+    props.replies > 0 && `${props.replies} repl${props.replies === 1 ? "y" : "ies"}`,
+  ].filter(Boolean);
   return (
-    <div className="timeline-item">
-      <div className={`review-event ${cls}`}>
-        <span className="review-icon">{review.state === "approved" ? "✓" : review.state === "changes_requested" ? "±" : "💬"}</span>
-        <b>{review.author}</b> <span className="muted">{text} {timeAgo(review.created_at)}</span>
-      </div>
-      {review.body && (
-        <div className="box">
-          <div className="comment-body">
-            <Markdown text={review.body} />
-          </div>
+    <div className="tl-item">
+      <Badge icon="review" tone={tone} />
+      <div className={`tl-content review ${cls}`}>
+        <div className="review-head">
+          <b>{review.author}</b> <span className="muted">{text} {timeAgo(review.created_at)}</span>
+          {counts.length > 0 && <span className="muted small"> · {counts.join(", ")}</span>}
         </div>
-      )}
+        {review.body && (
+          <div className="box">
+            <div className="comment-body">
+              <Markdown text={review.body} />
+            </div>
+          </div>
+        )}
+        {threads > 0 && <div className="review-threads">{props.children}</div>}
+      </div>
     </div>
   );
 }
@@ -1500,41 +1809,6 @@ function CommitRow(props: {
 function toggleEndpoint(endpoints: string[], oid: string): string[] | null {
   if (endpoints.includes(oid)) return endpoints.filter((e) => e !== oid);
   return endpoints.length < 2 ? [...endpoints, oid] : null;
-}
-
-/** The Conversation tab's commit list: click a commit to view it, or check two to compare. */
-function CommitList(props: { prId: number; commits: PrDetail["commits"]; onOpen: (r: CommitRange) => void }) {
-  const [endpoints, setEndpoints] = useState<string[]>([]);
-  const selection = rangeFromEndpoints(props.commits, endpoints);
-  const [lo, hi] = coveredBy(props.commits, selection);
-  const count = selection ? hi - lo + 1 : 0;
-  return (
-    <div className="timeline-item commits">
-      {props.commits.map((c, i) => (
-        <CommitRow
-          key={c.oid}
-          prId={props.prId}
-          commit={c}
-          checked={endpoints.includes(c.oid)}
-          included={i >= lo && i <= hi}
-          disabled={endpoints.length === 2 && !endpoints.includes(c.oid)}
-          onToggle={() => setEndpoints(toggleEndpoint(endpoints, c.oid) ?? endpoints)}
-          onOpen={() => props.onOpen({ from: c.oid, to: c.oid })}
-        />
-      ))}
-      {props.commits.length > 1 && (
-        <div className="commit-compare muted small">
-          {selection ? (
-            <button className="btn" onClick={() => props.onOpen(selection)}>
-              View changes in {count} commit{count === 1 ? "" : "s"}
-            </button>
-          ) : (
-            "Check two commits to compare all changes between them."
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 /** "Changes from" dropdown on the Files tab: click a commit to view it, or check two to compare. */

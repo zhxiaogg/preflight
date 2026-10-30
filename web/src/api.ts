@@ -27,8 +27,19 @@ export type PrDetail = {
   /** The branch was deleted; the PR is shown at the last commit seen. */
   base_missing: boolean;
   head_missing: boolean;
-  /** Newest first. `oid` is the full id, `sha` the short one. */
-  commits: { oid: string; sha: string; subject: string }[];
+  /** Newest first. `oid` is the full id, `sha` the short one, `time` the committer time. */
+  commits: { oid: string; sha: string; subject: string; time: number }[];
+  /** Closing, reopening and title/base changes, oldest first. */
+  activity: Activity[];
+};
+
+export type Activity = {
+  id: number;
+  kind: "pr_closed" | "pr_reopened" | "pr_edited";
+  actor: string;
+  /** For pr_edited: the changed fields' old and new values. */
+  data: Partial<Record<"title" | "base", { old: string; new: string }>>;
+  created_at: number;
 };
 
 export type Side = "old" | "new";
@@ -54,6 +65,8 @@ export type Comment = {
   updated_at: number | null;
   /** Part of the reviewer's review in progress; agents see it once the review is submitted. */
   pending: boolean;
+  /** The review that published this comment. */
+  review_id: number | null;
 };
 
 export type NewComment = {

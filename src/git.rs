@@ -72,18 +72,21 @@ pub struct Commit {
     pub oid: String,
     pub short: String,
     pub subject: String,
+    /// Committer time (unix seconds), to place the commit in the conversation timeline.
+    pub time: i64,
 }
 
 /// Commits on `head` not on `base`, newest first.
 pub fn commits(repo: &str, base: &str, head: &str) -> Result<Vec<Commit>> {
-    let out = git(repo, &["log", "--format=%H%x09%h%x09%s", &format!("{base}..{head}")])?;
+    let out = git(repo, &["log", "--format=%H%x09%h%x09%ct%x09%s", &format!("{base}..{head}")])?;
     Ok(out
         .lines()
         .filter_map(|l| {
-            let mut parts = l.splitn(3, '\t');
+            let mut parts = l.splitn(4, '\t');
             Some(Commit {
                 oid: parts.next()?.to_string(),
                 short: parts.next()?.to_string(),
+                time: parts.next()?.parse().ok()?,
                 subject: parts.next().unwrap_or("").to_string(),
             })
         })
