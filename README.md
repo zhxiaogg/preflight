@@ -26,11 +26,19 @@ Agent opens a preflight PR (diff is `base...head`, computed live, so new commits
 preflight pr create --repo /path/to/repo --base main --head my-feature --title "Add X" --description "Why…"
 ```
 
-Review in the browser like on GitHub: syntax-highlighted unified or split (side-by-side) diffs with a file tree, `+` on a line to comment (drag the `+` or shift-click line numbers to comment on several lines),
-expandable context around hunks (↑ expand up, ↓ expand down), markdown in descriptions and comments, editing/deleting your own comments, "Viewed" checkboxes, reply/resolve threads, and **Review changes**
-(Comment / Approve / Request changes). A banner appears when the agent pushes new commits.
-Click a commit to see just its changes, or check two commits (in the Conversation tab or the
-**Changes from** menu on the Files tab) to see all changes between them; those views are read-only.
+Review in the browser like on GitHub:
+
+- **Files changed**: syntax-highlighted diffs with a file tree, using the full window width; switch between
+  **Unified** and **Split** (side-by-side). Expand hidden context around hunks (↑ up, ↓ down) and mark
+  files **Viewed**.
+- **Comments**: `+` on a line to comment on either side; drag the `+` or shift-click line numbers to comment
+  on several lines. Reply, resolve, and edit or delete your own comments. Markdown everywhere.
+- **Review changes**: Comment / Approve / Request changes.
+- **Commits**: click one to see just its changes, or check two (in the Conversation tab or the
+  **Changes from** menu) to see everything between them; those views are read-only. A banner appears
+  when the agent pushes new commits.
+- **PR**: edit the title, description (markdown) and base branch; close and reopen. Closed PRs stay
+  viewable at the commits they had, even after their branches are deleted.
 
 Agent reads feedback and responds:
 
@@ -84,7 +92,8 @@ Don't resolve threads yourself unless asked; the reviewer resolves them.
 | GET/PATCH | `/api/prs/:id` | PR + base/head sha + commits / edit (`{title?, description?, base?}`) |
 | GET | `/api/prs/:id/branches` | branches that can be picked as the base |
 | GET | `/api/prs/:id/diff` | raw unified diff (`?from=<oid>&to=<oid>` for a range of the PR's commits) |
-| GET/POST | `/api/prs/:id/comments` | list / add (`{body, parent_id?, path?, line?, side?, line_text?, author?}`) |
+| GET | `/api/prs/:id/file` | file contents (`?path=…&rev=<oid>`), for expanding context |
+| GET/POST | `/api/prs/:id/comments` | list / add (`{body, parent_id?, path?, line?, side?, start_line?, start_side?, line_text?, author?}`) |
 | GET/POST | `/api/prs/:id/reviews` | list / submit (`{state: approved\|changes_requested\|commented, body}`) |
 | POST | `/api/prs/:id/state` | `{state: open\|closed}` |
 | PATCH/DELETE | `/api/comments/:id` | edit (`{body}`) / delete your own (`user`) comment |
@@ -94,4 +103,4 @@ The server binds to `127.0.0.1` only.
 
 ## Not in the MVP
 
-Split diff view, multi-line comments, pending (batched) review comments, merging, uncommitted working-tree diffs.
+Pending (batched) review comments, merging, uncommitted working-tree diffs.
