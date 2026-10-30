@@ -231,6 +231,7 @@ pub fn snapshot_shas(conn: &Connection, pr: &db::Pr) -> Result<()> {
     let base = git::rev_parse(&pr.repo, &pr.base).ok().or_else(|| pr.base_sha.clone());
     let head = git::rev_parse(&pr.repo, &pr.head).ok().or_else(|| pr.head_sha.clone());
     if let (Some(base), Some(head)) = (base, head) {
+        let base = git::pr_base(&pr.repo, base, &head, pr.base_sha.as_deref());
         db::set_shas(conn, pr.id, &base, &head)?;
     }
     Ok(())

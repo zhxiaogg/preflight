@@ -93,6 +93,7 @@ pub fn resolve(pr: &db::Pr) -> anyhow::Result<Refs> {
     };
     let (base, base_missing) = pick(&pr.base, &pr.base_sha)?;
     let (head, head_missing) = pick(&pr.head, &pr.head_sha)?;
+    let base = git::pr_base(&pr.repo, base, &head, pr.base_sha.as_deref());
     if pr.base_sha.as_deref() != Some(base.as_str()) || pr.head_sha.as_deref() != Some(head.as_str()) {
         db::set_shas(&db::open()?, pr.id, &base, &head)?;
     }

@@ -22,6 +22,21 @@ pub fn rev_parse(repo: &str, rev: &str) -> Result<String> {
     Ok(git(repo, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")])?.trim().to_string())
 }
 
+fn is_ancestor(repo: &str, ancestor: &str, rev: &str) -> bool {
+    git(repo, &["merge-base", "--is-ancestor", ancestor, rev]).is_ok()
+}
+
+/// The base commit to compare a PR against. Once `head` has been merged into the base branch, the
+/// branch's tip would show an empty diff, so the last base the PR was seen with is kept instead.
+pub fn pr_base(repo: &str, current: String, head: &str, last: Option<&str>) -> String {
+    match last {
+        Some(last) if last != current && is_ancestor(repo, head, &current) && !is_ancestor(repo, head, last) => {
+            last.to_string()
+        }
+        _ => current,
+    }
+}
+
 /// Same as GitHub: changes on `head` since it diverged from `base`.
 pub fn diff(repo: &str, base: &str, head: &str) -> Result<String> {
     git(repo, &["diff", "--no-color", "--no-ext-diff", "-M", &format!("{base}...{head}")])
